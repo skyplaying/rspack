@@ -1,18 +1,34 @@
-import { AsyncSeriesBailHook, HookMap, SyncHook } from "tapable";
-import util from "util";
-import { Compilation, LoaderContext } from ".";
+import util from "node:util";
+import * as liteTapable from "@rspack/lite-tapable";
 
-const compilationHooksMap = new WeakMap();
+import { Compilation } from "./Compilation";
+import type { Module } from "./Module";
+import type { LoaderContext } from "./config";
+
+const compilationHooksMap = new WeakMap<
+	Compilation,
+	{
+		loader: liteTapable.SyncHook<[LoaderContext, Module]>;
+		readResourceForScheme: any;
+		readResource: liteTapable.HookMap<
+			liteTapable.AsyncSeriesBailHook<[LoaderContext], string | Buffer>
+		>;
+	}
+>();
 
 const createFakeHook = <T extends Record<string, any>>(
 	fakeHook: T,
 	message?: string,
 	code?: string
 ): FakeHook<T> => {
-	if (message && code) {
-		fakeHook = deprecateAllProperties(fakeHook, message, code);
-	}
-	return Object.freeze(Object.assign(fakeHook, { _fakeHook: true }));
+	return Object.freeze(
+		Object.assign(
+			message && code
+				? deprecateAllProperties(fakeHook, message, code)
+				: fakeHook,
+			{ _fakeHook: true }
+		)
+	);
 };
 type FakeHook<T> = {
 	_fakeHook: true;
@@ -51,10 +67,8 @@ const deprecateAllProperties = <O extends object>(
 	}
 	return newObj;
 };
-// Actually it is just a NormalModule proxy, used for hooks api alignment
-// Maybe we can 1:1 align to webpack NormalModule once we found a better way to reduce communitate overhead between rust and js
+
 export class NormalModule {
-	constructor() {}
 	static getCompilationHooks(compilation: Compilation) {
 		if (!(compilation instanceof Compilation)) {
 			throw new TypeError(
@@ -64,15 +78,10 @@ export class NormalModule {
 		let hooks = compilationHooksMap.get(compilation);
 		if (hooks === undefined) {
 			hooks = {
-				// TODO: figure out why tsc complain about this
-				// @ts-ignore
-				loader: new SyncHook(["loaderContext", "module"]),
-				// beforeLoaders: new SyncHook(["loaders", "module", "loaderContext"]),
-				// beforeParse: new SyncHook(["module"]),
-				// beforeSnapshot: new SyncHook(["module"]),
+				loader: new liteTapable.SyncHook(["loaderContext", "module"]),
 				// TODO webpack 6 deprecate
-				readResourceForScheme: new HookMap(scheme => {
-					const hook = hooks.readResource.for(scheme);
+				readResourceForScheme: new liteTapable.HookMap(scheme => {
+					const hook = hooks!.readResource.for(scheme);
 					return createFakeHook({
 						tap: (options: string, fn: any) =>
 							hook.tap(options, (loaderContext: LoaderContext) =>
@@ -88,15 +97,16 @@ export class NormalModule {
 							hook.tapPromise(options, (loaderContext: LoaderContext) =>
 								fn(loaderContext.resource)
 							)
-					});
+					}) as any;
 				}),
-				readResource: new HookMap(
-					() => new AsyncSeriesBailHook(["loaderContext"])
+				readResource: new liteTapable.HookMap(
+					() => new liteTapable.AsyncSeriesBailHook(["loaderContext"])
 				)
-				// needBuild: new AsyncSeriesBailHook(["module", "context"])
 			};
 			compilationHooksMap.set(compilation, hooks);
 		}
 		return hooks;
 	}
 }
+
+export default NormalModule;

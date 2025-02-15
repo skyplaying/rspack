@@ -1,14 +1,14 @@
-import type { RspackCLI } from "../rspack-cli";
-import { RspackDevServer } from "@rspack/dev-server";
-import { RspackCommand, RspackPreviewCLIOptions } from "../types";
-import { previewOptions } from "../utils/options";
+import path from "node:path";
 import {
-	DevServer,
-	rspack,
-	RspackOptions,
-	MultiRspackOptions
+	type DevServer,
+	type MultiRspackOptions,
+	type RspackOptions,
+	rspack
 } from "@rspack/core";
-import path from "path";
+
+import type { RspackCLI } from "../cli";
+import type { RspackCommand, RspackPreviewCLIOptions } from "../types";
+import { previewOptions } from "../utils/options";
 
 const defaultRoot = "dist";
 export class PreviewCommand implements RspackCommand {
@@ -26,6 +26,7 @@ export class PreviewCommand implements RspackCommand {
 						...options
 					}
 				};
+				const { RspackDevServer } = await import("@rspack/dev-server");
 
 				let config = await cli.loadConfig(rspackOptions);
 				config = await getPreviewConfig(config, options);
@@ -40,9 +41,9 @@ export class PreviewCommand implements RspackCommand {
 
 				const devServerOptions = config.devServer as DevServer;
 
-				const compiler = rspack({ entry: {} });
-				if (!compiler) return;
 				try {
+					const compiler = rspack({ entry: {} });
+					if (!compiler) return;
 					const server = new RspackDevServer(devServerOptions, compiler);
 
 					await server.start();
@@ -68,8 +69,8 @@ async function getPreviewConfig(
 			static: {
 				directory: options.dir
 					? path.join(item.context ?? process.cwd(), options.dir)
-					: item.output?.path ??
-					  path.join(item.context ?? process.cwd(), defaultRoot),
+					: (item.output?.path ??
+						path.join(item.context ?? process.cwd(), defaultRoot)),
 				publicPath: options.publicPath ?? "/"
 			},
 			port: options.port ?? 8080,
@@ -84,7 +85,6 @@ async function getPreviewConfig(
 
 	if (Array.isArray(item)) {
 		return Promise.all(item.map(internalPreviewConfig));
-	} else {
-		return internalPreviewConfig(item as RspackOptions);
 	}
+	return internalPreviewConfig(item as RspackOptions);
 }

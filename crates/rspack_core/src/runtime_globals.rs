@@ -1,19 +1,15 @@
 use std::fmt;
 
 use bitflags::bitflags;
-use swc_core::ecma::atoms::JsWord;
+use swc_core::ecma::atoms::Atom;
+
+#[rspack_cacheable::cacheable]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+pub struct RuntimeGlobals(u128);
 
 bitflags! {
-  pub struct RuntimeGlobals: u64 {
+  impl RuntimeGlobals: u128 {
     const REQUIRE_SCOPE = 1 << 0;
-
-    const EXPORT_STAR = 1 << 1;
-    /**
-     * rspack
-     * load chunk with module, let module code generation result can be cached at hmr
-     */
-    const LOAD_CHUNK_WITH_MODULE = 1 << 2;
-    // port from webpack RuntimeGlobals
 
     /**
      * the internal module object
@@ -214,7 +210,53 @@ bitflags! {
 
     const NODE_MODULE_DECORATOR = 1 << 47;
 
-    const HARMONY_MODULE_DECORATOR = 1 << 48;
+    const ESM_MODULE_DECORATOR = 1 << 48;
+
+    /**
+     * the System.register context object
+     */
+    const SYSTEM_CONTEXT = 1 << 49;
+
+    const THIS_AS_EXPORTS = 1 << 50;
+
+    const CURRENT_REMOTE_GET_SCOPE = 1 << 51;
+
+    const SHARE_SCOPE_MAP = 1 << 52;
+
+    const INITIALIZE_SHARING = 1 << 53;
+
+    const SCRIPT_NONCE = 1 << 54;
+
+    const RELATIVE_URL = 1 << 55;
+
+    const CHUNK_NAME = 1 << 56;
+
+    const RUNTIME_ID = 1 << 57;
+
+    // prefetch and preload
+    const PREFETCH_CHUNK = 1 << 58;
+
+    const PREFETCH_CHUNK_HANDLERS = 1 << 59;
+
+    const PRELOAD_CHUNK = 1 << 60;
+
+    const PRELOAD_CHUNK_HANDLERS = 1 << 61;
+
+    const UNCAUGHT_ERROR_HANDLER = 1 << 62;
+
+    // rspack only
+    const RSPACK_VERSION = 1 << 63;
+
+    const HAS_CSS_MODULES = 1 << 64;
+
+    // rspack only
+    const RSPACK_UNIQUE_ID = 1 << 65;
+
+    const HAS_FETCH_PRIORITY = 1 << 66;
+
+    // amd module support
+    const AMD_DEFINE = 1 << 67;
+    const AMD_OPTIONS = 1 << 68;
   }
 }
 
@@ -232,12 +274,10 @@ impl Default for RuntimeGlobals {
 }
 
 impl RuntimeGlobals {
-  pub fn name(&self) -> &'static str {
+  pub const fn name(&self) -> &'static str {
     use RuntimeGlobals as R;
     match *self {
       R::REQUIRE_SCOPE => "__webpack_require__.*",
-      R::EXPORT_STAR => "es",
-      R::LOAD_CHUNK_WITH_MODULE => "__webpack_require__.el",
       R::MODULE => "module",
       R::MODULE_ID => "module.id",
       R::MODULE_LOADED => "module.loaded",
@@ -262,6 +302,8 @@ impl RuntimeGlobals {
       R::GET_CHUNK_UPDATE_CSS_FILENAME => "__webpack_require__.hk",
       R::HMR_MODULE_DATA => "__webpack_require__.hmrD",
       R::HMR_RUNTIME_STATE_PREFIX => "__webpack_require__.hmrS",
+      R::AMD_DEFINE => "__webpack_require__.amdD",
+      R::AMD_OPTIONS => "__webpack_require__.amdO",
       R::EXTERNAL_INSTALL_CHUNK => "__webpack_require__.C",
       R::GET_FULL_HASH => "__webpack_require__.h",
       R::GLOBAL => "__webpack_require__.g",
@@ -282,32 +324,34 @@ impl RuntimeGlobals {
       R::EXPORTS => "__webpack_exports__",
       R::COMPAT_GET_DEFAULT_EXPORT => "__webpack_require__.n",
       R::CREATE_FAKE_NAMESPACE_OBJECT => "__webpack_require__.t",
-      R::HARMONY_MODULE_DECORATOR => "__webpack_require__.hmd",
+      R::ESM_MODULE_DECORATOR => "__webpack_require__.hmd",
       R::NODE_MODULE_DECORATOR => "__webpack_require__.nmd",
-      r => panic!(
-        "Unexpected flag `{r:?}`. RuntimeGlobals should only be printed for one single flag."
-      ),
-    }
-  }
+      R::SYSTEM_CONTEXT => "__webpack_require__.y",
+      R::THIS_AS_EXPORTS => "top-level-this-exports",
+      R::CURRENT_REMOTE_GET_SCOPE => "__webpack_require__.R",
+      R::SHARE_SCOPE_MAP => "__webpack_require__.S",
+      R::INITIALIZE_SHARING => "__webpack_require__.I",
+      R::SCRIPT_NONCE => "__webpack_require__.nc",
+      R::RELATIVE_URL => "__webpack_require__.U",
+      R::CHUNK_NAME => "__webpack_require__.cn",
+      R::RUNTIME_ID => "__webpack_require__.j",
+      R::PREFETCH_CHUNK => "__webpack_require__.E",
+      R::PREFETCH_CHUNK_HANDLERS => "__webpack_require__.F",
+      R::PRELOAD_CHUNK => "__webpack_require__.G",
+      R::PRELOAD_CHUNK_HANDLERS => "__webpack_require__.H",
+      R::UNCAUGHT_ERROR_HANDLER => "__webpack_require__.oe",
+      // rspack only
+      R::RSPACK_VERSION => "__webpack_require__.rv",
+      R::RSPACK_UNIQUE_ID => "__webpack_require__.ruid",
+      R::HAS_CSS_MODULES => "has css modules",
 
-  /// A stub function for bitflags `iter` in 2.0.0, we are stuck to 1.3.0 now
-  pub fn iter(&self) -> impl Iterator<Item = Self> {
-    let mut bit = 0;
-    let bits = self.bits();
-    std::iter::from_fn(move || {
-      while bit < 64 {
-        let flag = 1 << bit;
-        bit += 1;
-        if bits & flag != 0 {
-          return Self::from_bits(flag);
-        }
-      }
-      None
-    })
+      R::HAS_FETCH_PRIORITY => "has fetch priority",
+      _ => unreachable!(),
+    }
   }
 }
 
-impl From<RuntimeGlobals> for JsWord {
+impl From<RuntimeGlobals> for Atom {
   fn from(value: RuntimeGlobals) -> Self {
     value.name().into()
   }
