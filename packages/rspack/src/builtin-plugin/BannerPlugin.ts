@@ -1,115 +1,72 @@
-import { z } from "zod";
 import {
-	JsChunk,
-	RawBannerContent,
-	RawBannerPluginOptions,
-	RawBannerRule,
-	RawBannerRules
+	BuiltinPluginName,
+	type JsChunk,
+	type RawBannerPluginOptions
 } from "@rspack/binding";
-import { BuiltinPluginName, create } from "./base";
 
-const rule = z.string().or(z.instanceof(RegExp));
-export type Rule = z.infer<typeof rule>;
+import { create } from "./base";
 
-const rules = rule.or(rule.array());
-export type Rules = z.infer<typeof rules>;
+export type Rule = string | RegExp;
 
-const bannerFunction = z
-	.function()
-	.args(
-		z.object({
-			hash: z.string(),
-			chunk: z.custom<JsChunk>(),
-			filename: z.string()
-		})
-	)
-	.returns(z.string());
-export type BannerFunction = z.infer<typeof bannerFunction>;
+export type Rules = Rule[] | Rule;
 
-const bannerContent = z.string().or(bannerFunction);
-export type BannerContent = z.infer<typeof bannerContent>;
+export type BannerFunction = (args: {
+	hash: string;
+	chunk: JsChunk;
+	filename: string;
+}) => string;
 
-const bannerPluginOptions = z.strictObject({
-	banner: bannerContent,
-	entryOnly: z.boolean().optional(),
-	exclude: rules.optional(),
-	include: rules.optional(),
-	raw: z.boolean().optional(),
-	footer: z.boolean().optional(),
-	test: rules.optional()
-});
-export type BannerPluginOptions = z.infer<typeof bannerPluginOptions>;
+export type BannerContent = string | BannerFunction;
 
-const bannerPluginArgument = bannerContent.or(bannerPluginOptions);
-export type BannerPluginArgument = z.infer<typeof bannerPluginArgument>;
+export type BannerPluginOptions = {
+	/** Specifies the banner, it will be wrapped in a comment. */
+	banner: BannerContent;
 
-function getRawBannerRule(condition: Rule): RawBannerRule {
-	if (typeof condition === "string") {
-		return {
-			type: "string",
-			stringMatcher: condition
-		};
-	}
-	if (condition instanceof RegExp) {
-		return {
-			type: "regexp",
-			regexpMatcher: condition.source
-		};
-	}
-	throw new Error("unreachable: condition should be one of string, RegExp");
-}
+	/** If true, the banner will only be added to the entry chunks. */
+	entryOnly?: boolean;
 
-function getRawBannerRules(condition?: Rules): RawBannerRules | undefined {
-	if (!condition) return undefined;
+	/** Exclude all modules matching any of these conditions. */
+	exclude?: Rules;
 
-	if (Array.isArray(condition)) {
-		return {
-			type: "array",
-			arrayMatcher: condition.map(i => getRawBannerRule(i))
-		};
-	}
+	/** Include all modules matching any of these conditions. */
+	include?: Rules;
 
-	return getRawBannerRule(condition);
-}
+	/** If true, banner will not be wrapped in a comment. */
+	raw?: boolean;
 
-function getRawBannerContent(content: BannerContent): RawBannerContent {
-	if (typeof content === "string") {
-		return {
-			type: "string",
-			stringPayload: content
-		};
-	}
-	if (typeof content === "function") {
-		return {
-			type: "function",
-			fnPayload: content
-		};
-	}
-	throw new Error("BannerContent should be a string or function");
-}
+	/** If true, banner will be placed at the end of the output. */
+	footer?: boolean;
+
+	/**
+	 * The stage of the compilation in which the banner should be injected.
+	 * @default PROCESS_ASSETS_STAGE_ADDITIONS (-100)
+	 */
+	stage?: number;
+
+	/** Include all modules that pass test assertion. */
+	test?: Rules;
+};
+
+export type BannerPluginArgument = BannerContent | BannerPluginOptions;
 
 export const BannerPlugin = create(
 	BuiltinPluginName.BannerPlugin,
 	(args: BannerPluginArgument): RawBannerPluginOptions => {
-		if (typeof args === "string") {
+		if (typeof args === "string" || typeof args === "function") {
 			return {
-				banner: getRawBannerContent(args)
-			};
-		}
-		if (typeof args === "function") {
-			return {
-				banner: getRawBannerContent(args)
+				banner: args
 			};
 		}
 
 		return {
-			banner: getRawBannerContent(args.banner),
+			banner: args.banner,
 			entryOnly: args.entryOnly,
 			footer: args.footer,
 			raw: args.raw,
-			test: getRawBannerRules(args.test),
-			include: getRawBannerRules(args.include),
-			exclude: getRawBannerRules(args.exclude)
+			test: args.test,
+			stage: args.stage,
+			include: args.include,
+			exclude: args.exclude
 		};
 	}
 );

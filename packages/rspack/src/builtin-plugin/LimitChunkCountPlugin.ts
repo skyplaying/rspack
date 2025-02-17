@@ -1,5 +1,9 @@
-import { RawLimitChunkCountPluginOptions } from "@rspack/binding";
-import { BuiltinPluginName, create } from "./base";
+import {
+	BuiltinPluginName,
+	type RawLimitChunkCountPluginOptions
+} from "@rspack/binding";
+
+import { create } from "./base";
 
 export type LimitChunkCountOptions = {
 	chunkOverhead?: number;

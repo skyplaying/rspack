@@ -1,30 +1,29 @@
-use once_cell::sync::Lazy;
-use regex::{Captures, Regex};
+use rspack_cacheable::{cacheable, cacheable_dyn};
 use rspack_core::{
-  CodeGenerationDataFilename, CodeGenerationDataUrl, Compilation, Dependency, DependencyCategory,
-  DependencyId, DependencyTemplate, DependencyType, ErrorSpan, ModuleDependency, ModuleIdentifier,
-  PublicPath, TemplateContext, TemplateReplaceSource,
+  AsContextDependency, CodeGenerationDataFilename, CodeGenerationDataUrl, Compilation, Dependency,
+  DependencyCategory, DependencyId, DependencyRange, DependencyTemplate, DependencyType,
+  ModuleDependency, ModuleIdentifier, PublicPath, RuntimeSpec, TemplateContext,
+  TemplateReplaceSource,
 };
 
-use crate::utils::AUTO_PUBLIC_PATH_PLACEHOLDER;
+use crate::utils::{css_escape_string, AUTO_PUBLIC_PATH_PLACEHOLDER};
 
+#[cacheable]
 #[derive(Debug, Clone)]
 pub struct CssUrlDependency {
   id: DependencyId,
   request: String,
-  span: Option<ErrorSpan>,
-  start: u32,
-  end: u32,
+  range: DependencyRange,
+  replace_function: bool,
 }
 
 impl CssUrlDependency {
-  pub fn new(request: String, span: Option<ErrorSpan>, start: u32, end: u32) -> Self {
+  pub fn new(request: String, range: DependencyRange, replace_function: bool) -> Self {
     Self {
       request,
-      span,
-      start,
-      end,
+      range,
       id: DependencyId::new(),
+      replace_function,
     }
   }
 
@@ -38,11 +37,11 @@ impl CssUrlDependency {
     if let Some(code_gen_result) = code_gen_result {
       if let Some(url) = code_gen_result.data.get::<CodeGenerationDataUrl>() {
         Some(url.inner().to_string())
-      } else if let Some(filename) = code_gen_result.data.get::<CodeGenerationDataFilename>() {
-        let filename = filename.inner();
-        let public_path = match &compilation.options.output.public_path {
-          PublicPath::String(p) => p,
-          PublicPath::Auto => AUTO_PUBLIC_PATH_PLACEHOLDER,
+      } else if let Some(data) = code_gen_result.data.get::<CodeGenerationDataFilename>() {
+        let filename = data.filename();
+        let public_path = match data.public_path() {
+          PublicPath::Filename(p) => PublicPath::render_filename(compilation, p),
+          PublicPath::Auto => AUTO_PUBLIC_PATH_PLACEHOLDER.to_string(),
         };
         Some(format!("{public_path}{filename}"))
       } else {
@@ -54,6 +53,7 @@ impl CssUrlDependency {
   }
 }
 
+#[cacheable_dyn]
 impl Dependency for CssUrlDependency {
   fn id(&self) -> &DependencyId {
     &self.id
@@ -67,15 +67,16 @@ impl Dependency for CssUrlDependency {
     &DependencyType::CssUrl
   }
 
-  fn span(&self) -> Option<ErrorSpan> {
-    self.span
+  fn range(&self) -> Option<&DependencyRange> {
+    Some(&self.range)
   }
 
-  fn dependency_debug_name(&self) -> &'static str {
-    "CssUrlDependency"
+  fn could_affect_referencing_module(&self) -> rspack_core::AffectType {
+    rspack_core::AffectType::True
   }
 }
 
+#[cacheable_dyn]
 impl ModuleDependency for CssUrlDependency {
   fn request(&self) -> &str {
     &self.request
@@ -90,6 +91,7 @@ impl ModuleDependency for CssUrlDependency {
   }
 }
 
+#[cacheable_dyn]
 impl DependencyTemplate for CssUrlDependency {
   fn apply(
     &self,
@@ -98,48 +100,31 @@ impl DependencyTemplate for CssUrlDependency {
   ) {
     let TemplateContext { compilation, .. } = code_generatable_context;
     if let Some(mgm) = compilation
-        .module_graph
-        .module_graph_module_by_dependency_id(self.id())
+      .get_module_graph()
+      .module_graph_module_by_dependency_id(self.id())
       && let Some(target_url) = self.get_target_url(&mgm.module_identifier, compilation)
     {
-      let content = format!("url({})", css_escape_string(&target_url));
-      source.replace(self.start, self.end, &content, None);
+      let target_url = css_escape_string(&target_url);
+      let content = if self.replace_function {
+        format!("url({target_url})")
+      } else {
+        target_url
+      };
+      source.replace(self.range.start, self.range.end, &content, None);
     }
+  }
+
+  fn dependency_id(&self) -> Option<DependencyId> {
+    Some(self.id)
+  }
+
+  fn update_hash(
+    &self,
+    _hasher: &mut dyn std::hash::Hasher,
+    _compilation: &Compilation,
+    _runtime: Option<&RuntimeSpec>,
+  ) {
   }
 }
 
-static WHITE_OR_BRACKET_REGEX: Lazy<Regex> =
-  Lazy::new(|| Regex::new(r#"[\n\t ()'"\\]"#).expect("Invalid Regexp"));
-static QUOTATION_REGEX: Lazy<Regex> =
-  Lazy::new(|| Regex::new(r#"[\n"\\]"#).expect("Invalid Regexp"));
-static APOSTROPHE_REGEX: Lazy<Regex> =
-  Lazy::new(|| Regex::new(r#"[\n'\\]"#).expect("Invalid Regexp"));
-
-fn css_escape_string(s: &str) -> String {
-  let mut count_white_or_bracket = 0;
-  let mut count_quotation = 0;
-  let mut count_apostrophe = 0;
-  for c in s.chars() {
-    match c {
-      '\t' | '\n' | ' ' | '(' | ')' => count_white_or_bracket += 1,
-      '"' => count_quotation += 1,
-      '\'' => count_apostrophe += 1,
-      _ => {}
-    }
-  }
-  if count_white_or_bracket < 2 {
-    WHITE_OR_BRACKET_REGEX
-      .replace_all(s, |caps: &Captures| format!("\\{}", &caps[0]))
-      .into_owned()
-  } else if count_quotation <= count_apostrophe {
-    format!(
-      "\"{}\"",
-      QUOTATION_REGEX.replace_all(s, |caps: &Captures| format!("\\{}", &caps[0]))
-    )
-  } else {
-    format!(
-      "\'{}\'",
-      APOSTROPHE_REGEX.replace_all(s, |caps: &Captures| format!("\\{}", &caps[0]))
-    )
-  }
-}
+impl AsContextDependency for CssUrlDependency {}

@@ -7,11 +7,17 @@
  * Copyright (c) JS Foundation and other contributors
  * https://github.com/webpack/webpack/blob/main/LICENSE
  */
-import { HookMap, SyncBailHook, SyncWaterfallHook } from "tapable";
-import { concatComparators, Comparator } from "../util/comparators";
-import { smartGrouping, GroupConfig } from "../util/smartGrouping";
+import type {
+	JsStats,
+	JsStatsCompilation,
+	JsStatsError,
+	JsStatsWarning
+} from "@rspack/binding";
+import { HookMap, SyncBailHook, SyncWaterfallHook } from "@rspack/lite-tapable";
+
 import type { Compilation } from "../Compilation";
-import { JsStats, JsStatsError, JsStatsWarning } from "@rspack/binding";
+import { type Comparator, concatComparators } from "../util/comparators";
+import { type GroupConfig, smartGrouping } from "../util/smartGrouping";
 
 export type KnownStatsFactoryContext = {
 	type: string;
@@ -23,7 +29,8 @@ export type KnownStatsFactoryContext = {
 	// runtime?: RuntimeSpec | undefined;
 	cachedGetErrors?: ((arg0: Compilation) => JsStatsError[]) | undefined;
 	cachedGetWarnings?: ((arg0: Compilation) => JsStatsWarning[]) | undefined;
-	_inner: JsStats;
+	getStatsCompilation: (compilation: Compilation) => JsStatsCompilation;
+	getInner: (compilation: Compilation) => JsStats;
 };
 
 export type StatsFactoryContext = KnownStatsFactoryContext &
@@ -38,7 +45,7 @@ type Hooks = Readonly<{
 		SyncBailHook<[any, StatsFactoryContext, number, number], undefined>
 	>;
 	groupResults: HookMap<
-		SyncBailHook<[GroupConfig[], StatsFactoryContext], undefined>
+		SyncBailHook<[GroupConfig<any>[], StatsFactoryContext], undefined>
 	>;
 	filterResults: HookMap<
 		SyncBailHook<[any, StatsFactoryContext, number, number], undefined>
@@ -55,7 +62,7 @@ type Hooks = Readonly<{
 			undefined
 		>
 	>;
-	result: HookMap<SyncWaterfallHook<[any[], StatsFactoryContext], undefined>>;
+	result: HookMap<SyncWaterfallHook<[any[], StatsFactoryContext]>>;
 	merge: HookMap<SyncBailHook<[any[], StatsFactoryContext], undefined>>;
 	getItemName: HookMap<
 		SyncBailHook<[any, StatsFactoryContext], string | undefined>
@@ -114,10 +121,10 @@ export class StatsFactory {
 			),
 			groupResults: new HookMap(
 				() =>
-					new SyncBailHook<[GroupConfig[], StatsFactoryContext], undefined>([
-						"groupConfigs",
-						"context"
-					])
+					new SyncBailHook<
+						[GroupConfig<any>[], StatsFactoryContext],
+						undefined
+					>(["groupConfigs", "context"])
 			),
 			sortResults: new HookMap(
 				() =>
@@ -142,7 +149,7 @@ export class StatsFactory {
 			),
 			result: new HookMap(
 				() =>
-					new SyncWaterfallHook<[any[], StatsFactoryContext], undefined>([
+					new SyncWaterfallHook<[any[], StatsFactoryContext]>([
 						"result",
 						"context"
 					])
@@ -164,12 +171,13 @@ export class StatsFactory {
 		});
 
 		const hooks = this.hooks;
-		this._caches = Object.keys(hooks).reduce((prev, curr) => {
-			return {
-				...prev,
-				[curr]: new Map()
-			};
-		}, {} as Cache);
+		const caches = {} as Cache;
+
+		for (const key of Object.keys(hooks)) {
+			caches[key as keyof Cache] = new Map();
+		}
+
+		this._caches = caches;
 		this._inCreate = false;
 	}
 
@@ -209,10 +217,9 @@ export class StatsFactory {
 		data: any,
 		fn: CallFn
 	) {
-		for (const hook of this._getAllLevelHooks(hookMap, cache, type)) {
-			data = fn(hook, data);
-		}
-		return data;
+		return this._getAllLevelHooks(hookMap, cache, type).reduce((data, hook) => {
+			return fn(hook, data);
+		}, data);
 	}
 
 	_forEachLevelFilter(
@@ -246,15 +253,14 @@ export class StatsFactory {
 	) {
 		if (this._inCreate) {
 			return this._create(type, data, baseContext);
-		} else {
-			try {
-				this._inCreate = true;
-				return this._create(type, data, baseContext);
-			} finally {
-				for (const key of Object.keys(this._caches) as CacheKey[])
-					this._caches[key].clear();
-				this._inCreate = false;
-			}
+		}
+		try {
+			this._inCreate = true;
+			return this._create(type, data, baseContext);
+		} finally {
+			for (const key of Object.keys(this._caches) as CacheKey[])
+				this._caches[key].clear();
+			this._inCreate = false;
 		}
 	}
 
@@ -285,10 +291,7 @@ export class StatsFactory {
 				h.call(comparators, context)
 			);
 			if (comparators.length > 0) {
-				items.sort(
-					// @ts-expect-error number of arguments is correct
-					concatComparators(...comparators)
-				);
+				items.sort(concatComparators(...comparators));
 			}
 
 			// run filter on sorted items
@@ -344,14 +347,11 @@ export class StatsFactory {
 				h => h.call(comparators2, context)
 			);
 			if (comparators2.length > 0) {
-				resultItems.sort(
-					// @ts-expect-error number of arguments is correct
-					concatComparators(...comparators2)
-				);
+				resultItems.sort(concatComparators(...comparators2));
 			}
 
 			// group result items
-			const groupConfigs: GroupConfig[] = [];
+			const groupConfigs: GroupConfig<any>[] = [];
 			this._forEachLevel(
 				this.hooks.groupResults,
 				this._caches.groupResults,
@@ -389,22 +389,21 @@ export class StatsFactory {
 				result,
 				(h, r) => h.call(r, context)
 			);
-		} else {
-			const object = {};
-
-			// run extract on value
-			this._forEachLevel(this.hooks.extract, this._caches.extract, type, h =>
-				h.call(object, data, context)
-			);
-
-			// run result on extracted object
-			return this._forEachLevelWaterfall(
-				this.hooks.result,
-				this._caches.result,
-				type,
-				object,
-				(h, r) => h.call(r, context)
-			);
 		}
+		const object = {};
+
+		// run extract on value
+		this._forEachLevel(this.hooks.extract, this._caches.extract, type, h =>
+			h.call(object, data, context)
+		);
+
+		// run result on extracted object
+		return this._forEachLevelWaterfall(
+			this.hooks.result,
+			this._caches.result,
+			type,
+			object,
+			(h, r) => h.call(r, context)
+		);
 	}
 }

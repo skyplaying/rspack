@@ -1,41 +1,41 @@
+mod create_script_url_dependency;
+pub use create_script_url_dependency::CreateScriptUrlDependency;
+use rspack_cacheable::{cacheable, cacheable_dyn};
 use rspack_core::{
-  ChunkGroupOptionsKindRef, Dependency, DependencyCategory, DependencyId, DependencyTemplate,
-  DependencyType, EntryOptions, ErrorSpan, ExtendedReferencedExport, ModuleDependency, ModuleGraph,
+  AsContextDependency, Compilation, Dependency, DependencyCategory, DependencyId, DependencyRange,
+  DependencyTemplate, DependencyType, ExtendedReferencedExport, ModuleDependency, ModuleGraph,
   RuntimeGlobals, RuntimeSpec, TemplateContext, TemplateReplaceSource,
 };
+use rspack_util::ext::DynHash;
 
+#[cacheable]
 #[derive(Debug, Clone)]
 pub struct WorkerDependency {
-  start: u32,
-  end: u32,
   id: DependencyId,
   request: String,
-  span: Option<ErrorSpan>,
-  group_options: EntryOptions,
   public_path: String,
+  range: DependencyRange,
+  range_path: DependencyRange,
 }
 
 impl WorkerDependency {
   pub fn new(
-    start: u32,
-    end: u32,
     request: String,
     public_path: String,
-    span: Option<ErrorSpan>,
-    group_options: EntryOptions,
+    range: DependencyRange,
+    range_path: DependencyRange,
   ) -> Self {
     Self {
-      start,
-      end,
       id: DependencyId::new(),
       request,
-      span,
-      group_options,
       public_path,
+      range,
+      range_path,
     }
   }
 }
 
+#[cacheable_dyn]
 impl Dependency for WorkerDependency {
   fn id(&self) -> &DependencyId {
     &self.id
@@ -49,15 +49,24 @@ impl Dependency for WorkerDependency {
     &DependencyType::NewWorker
   }
 
-  fn span(&self) -> Option<ErrorSpan> {
-    self.span
+  fn range(&self) -> Option<&DependencyRange> {
+    Some(&self.range)
   }
 
-  fn dependency_debug_name(&self) -> &'static str {
-    "WorkerDependency"
+  fn get_referenced_exports(
+    &self,
+    _module_graph: &ModuleGraph,
+    _runtime: Option<&RuntimeSpec>,
+  ) -> Vec<ExtendedReferencedExport> {
+    vec![]
+  }
+
+  fn could_affect_referencing_module(&self) -> rspack_core::AffectType {
+    rspack_core::AffectType::True
   }
 }
 
+#[cacheable_dyn]
 impl ModuleDependency for WorkerDependency {
   fn request(&self) -> &str {
     &self.request
@@ -70,20 +79,9 @@ impl ModuleDependency for WorkerDependency {
   fn set_request(&mut self, request: String) {
     self.request = request;
   }
-
-  fn group_options(&self) -> Option<ChunkGroupOptionsKindRef> {
-    Some(ChunkGroupOptionsKindRef::Entry(&self.group_options))
-  }
-
-  fn get_referenced_exports(
-    &self,
-    _module_graph: &ModuleGraph,
-    _runtime: Option<&RuntimeSpec>,
-  ) -> Vec<ExtendedReferencedExport> {
-    vec![]
-  }
 }
 
+#[cacheable_dyn]
 impl DependencyTemplate for WorkerDependency {
   fn apply(
     &self,
@@ -96,16 +94,16 @@ impl DependencyTemplate for WorkerDependency {
       ..
     } = code_generatable_context;
     let chunk_id = compilation
-      .module_graph
-      .module_identifier_by_dependency_id(&self.id)
-      .and_then(|module| {
+      .get_module_graph()
+      .get_parent_block(&self.id)
+      .and_then(|block| {
         compilation
           .chunk_graph
-          .get_block_chunk_group(module, &compilation.chunk_group_by_ukey)
+          .get_block_chunk_group(block, &compilation.chunk_group_by_ukey)
       })
       .map(|entrypoint| entrypoint.get_entry_point_chunk())
       .and_then(|ukey| compilation.chunk_by_ukey.get(&ukey))
-      .and_then(|chunk| chunk.id.as_deref())
+      .and_then(|chunk| chunk.id(&compilation.chunk_ids_artifact))
       .and_then(|chunk_id| serde_json::to_string(chunk_id).ok())
       .expect("failed to get json stringified chunk id");
     let worker_import_base_url = if !self.public_path.is_empty() {
@@ -119,8 +117,8 @@ impl DependencyTemplate for WorkerDependency {
     runtime_requirements.insert(RuntimeGlobals::GET_CHUNK_SCRIPT_FILENAME);
 
     source.replace(
-      self.start,
-      self.end,
+      self.range_path.start,
+      self.range_path.end,
       format!(
         "/* worker import */{} + {}({}), {}",
         worker_import_base_url,
@@ -132,4 +130,19 @@ impl DependencyTemplate for WorkerDependency {
       None,
     );
   }
+
+  fn dependency_id(&self) -> Option<DependencyId> {
+    Some(self.id)
+  }
+
+  fn update_hash(
+    &self,
+    hasher: &mut dyn std::hash::Hasher,
+    _compilation: &Compilation,
+    _runtime: Option<&RuntimeSpec>,
+  ) {
+    self.public_path.dyn_hash(hasher);
+  }
 }
+
+impl AsContextDependency for WorkerDependency {}

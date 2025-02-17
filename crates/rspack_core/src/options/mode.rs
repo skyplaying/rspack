@@ -1,4 +1,4 @@
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Hash)]
 pub enum Mode {
   Development,
   Production,
@@ -11,8 +11,8 @@ impl Mode {
   }
 }
 
-impl From<String> for Mode {
-  fn from(value: String) -> Self {
+impl<T: AsRef<str>> From<T> for Mode {
+  fn from(value: T) -> Self {
     match value.as_ref() {
       "none" => Self::None,
       "development" => Self::Development,
