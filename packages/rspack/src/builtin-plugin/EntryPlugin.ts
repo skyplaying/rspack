@@ -1,43 +1,76 @@
-import { RawEntryOptions, RawEntryPluginOptions } from "@rspack/binding";
-import { BuiltinPluginName, create } from "./base";
-import { ChunkLoading, EntryRuntime, Filename, PublicPath } from "..";
+import {
+	BuiltinPluginName,
+	type JsEntryOptions,
+	type JsEntryPluginOptions
+} from "@rspack/binding";
 
-export type EntryOptions = {
+import type { EntryDescriptionNormalized } from "../config";
+import { create } from "./base";
+
+/**
+ * Options for the `EntryPlugin`.
+ */
+export type EntryOptions = Omit<EntryDescriptionNormalized, "import"> & {
+	/**
+	 * The name of the entry chunk.
+	 */
 	name?: string;
-	runtime?: EntryRuntime;
-	chunkLoading?: ChunkLoading;
-	asyncChunks?: boolean;
-	publicPath?: PublicPath;
-	baseUri?: string;
-	filename?: Filename;
 };
-export const EntryPlugin = create(
+
+/**
+ * The entry plugin that will handle creation of the `EntryDependency`.
+ * It adds an entry chunk on compilation. The chunk is named `options.name` and
+ * contains only one module (plus dependencies). The module is resolved from
+ * `entry` in `context` (absolute path).
+ */
+const OriginEntryPlugin = create(
 	BuiltinPluginName.EntryPlugin,
 	(
 		context: string,
 		entry: string,
 		options: EntryOptions | string = ""
-	): RawEntryPluginOptions => {
-		let entryOptions =
+	): JsEntryPluginOptions => {
+		const entryOptions =
 			typeof options === "string" ? { name: options } : options;
 		return {
 			context,
 			entry,
 			options: getRawEntryOptions(entryOptions)
 		};
-	}
+	},
+	"make"
 );
 
-function getRawEntryOptions(entry: EntryOptions): RawEntryOptions {
+// TODO: Currently, the Rspack framework does not support the inheritance hierarchy of Dependency.
+interface EntryDependency {
+	request: string;
+}
+
+type EntryPluginType = typeof OriginEntryPlugin & {
+	createDependency(entry: string): EntryDependency;
+};
+
+export const EntryPlugin = OriginEntryPlugin as EntryPluginType;
+
+EntryPlugin.createDependency = request => {
+	return {
+		request
+	};
+};
+
+export function getRawEntryOptions(entry: EntryOptions): JsEntryOptions {
 	const runtime = entry.runtime;
 	const chunkLoading = entry.chunkLoading;
 	return {
 		name: entry.name,
 		publicPath: entry.publicPath,
 		baseUri: entry.baseUri,
-		runtime: runtime === false ? undefined : runtime,
-		chunkLoading: chunkLoading === false ? "false" : chunkLoading,
+		runtime,
+		chunkLoading,
 		asyncChunks: entry.asyncChunks,
-		filename: entry.filename
+		filename: entry.filename,
+		library: entry.library,
+		layer: entry.layer ?? undefined,
+		dependOn: entry.dependOn
 	};
 }

@@ -1,13 +1,13 @@
 import fs from "fs";
-import { run } from "../../utils/test-utils";
 import { resolve } from "path";
+import { run } from "../../utils/test-utils";
 
 const defaultTracePath = "./trace.json";
 const defaultJSCPUPath = "./jscpuprofile.json";
 const defaultLoggingPath = "./logging.json";
-const customTracePath = "./custom.trace";
-const customJSCPUPath = "./custom.jscpuprofile";
-const customLoggingPath = "./custom.logging";
+const customTracePath = "./custom/trace";
+const customJSCPUPath = "./custom/jscpuprofile";
+const customLoggingPath = "./custom/logging";
 
 function findDefaultOutputDirname() {
 	const files = fs.readdirSync(__dirname);
@@ -124,9 +124,9 @@ describe("profile", () => {
 			__dirname,
 			[],
 			{},
-			{ RSPACK_PROFILE: `TRACE=layer=logger&filter=rspack_node::plugins` }
+			{ RSPACK_PROFILE: `TRACE=layer=logger&filter=rspack_core::compiler` }
 		);
 		expect(exitCode).toBe(0);
-		expect(stdout.includes("rspack_node::plugins")).toBe(true);
+		expect(stdout.includes("rspack_core::compiler")).toBe(true);
 	});
 });

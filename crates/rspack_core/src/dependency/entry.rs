@@ -1,30 +1,44 @@
+use rspack_cacheable::{cacheable, cacheable_dyn};
+
+use super::AffectType;
 use crate::{
-  AsDependencyTemplate, Context, Dependency, DependencyCategory, DependencyId, DependencyType,
-  ModuleDependency,
+  AsContextDependency, AsDependencyTemplate, Context, Dependency, DependencyCategory, DependencyId,
+  DependencyType, ModuleDependency, ModuleLayer,
 };
 
+#[cacheable]
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub struct EntryDependency {
   id: DependencyId,
   request: String,
   context: Context,
+  layer: Option<ModuleLayer>,
+  is_global: bool,
 }
 
 impl EntryDependency {
-  pub fn new(request: String, context: Context) -> Self {
+  pub fn new(
+    request: String,
+    context: Context,
+    layer: Option<ModuleLayer>,
+    is_global: bool,
+  ) -> Self {
     Self {
       request,
       context,
+      layer,
       id: DependencyId::new(),
+      is_global,
     }
+  }
+
+  pub fn is_global(&self) -> bool {
+    self.is_global
   }
 }
 
+#[cacheable_dyn]
 impl Dependency for EntryDependency {
-  fn dependency_debug_name(&self) -> &'static str {
-    "EntryDependency"
-  }
-
   fn id(&self) -> &DependencyId {
     &self.id
   }
@@ -40,8 +54,17 @@ impl Dependency for EntryDependency {
   fn get_context(&self) -> Option<&Context> {
     Some(&self.context)
   }
+
+  fn get_layer(&self) -> Option<&ModuleLayer> {
+    self.layer.as_ref()
+  }
+
+  fn could_affect_referencing_module(&self) -> AffectType {
+    AffectType::True
+  }
 }
 
+#[cacheable_dyn]
 impl ModuleDependency for EntryDependency {
   fn request(&self) -> &str {
     &self.request
@@ -57,3 +80,4 @@ impl ModuleDependency for EntryDependency {
 }
 
 impl AsDependencyTemplate for EntryDependency {}
+impl AsContextDependency for EntryDependency {}

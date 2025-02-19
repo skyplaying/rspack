@@ -1,28 +1,35 @@
 import type {
 	JsAssetInfo,
-	JsLoaderContext,
 	RawModuleRuleUse,
 	RawOptions
 } from "@rspack/binding";
-import { ResolveRequest } from "enhanced-resolve";
+import type { ResolveRequest } from "enhanced-resolve";
 
-import { Compiler } from "../Compiler";
-import { Logger } from "../logging/Logger";
-import Hash from "../util/hash";
-import { Mode, Resolve, RuleSetUseItem, RuleSetLoaderWithOptions } from "./zod";
-import { parsePathQueryFragment } from "../loader-runner";
-import { deprecatedWarn, isNil, termlink } from "../util";
+import type { Compilation } from "../Compilation";
+import type { Compiler } from "../Compiler";
+import type { Module } from "../Module";
+import { resolvePluginImport } from "../builtin-loader";
 import {
-	resolveEmotion,
-	resolvePluginImport,
-	resolveReact,
-	resolveRelay
-} from "../builtin-loader";
+	type FeatureOptions,
+	toFeatures
+} from "../builtin-loader/lightningcss";
+import { type LoaderObject, parsePathQueryFragment } from "../loader-runner";
+import type { Logger } from "../logging/Logger";
+import { isNil } from "../util";
+import type Hash from "../util/hash";
+import type { RspackOptionsNormalized } from "./normalization";
+import type {
+	Mode,
+	PublicPath,
+	Resolve,
+	RuleSetLoaderWithOptions,
+	RuleSetUseItem,
+	Target
+} from "./types";
 
-const BUILTIN_LOADER_PREFIX = "builtin:";
+export const BUILTIN_LOADER_PREFIX = "builtin:";
 
 export interface ComposeJsUseOptions {
-	devtool: RawOptions["devtool"];
 	context: RawOptions["context"];
 	mode: RawOptions["mode"];
 	experiments: RawOptions["experiments"];
@@ -43,19 +50,64 @@ export interface AdditionalData {
 	[index: string]: any;
 }
 
-export interface LoaderObject {
-	request: string;
-	path: string;
-	query: string;
-	fragment: string;
-	options: object | string | undefined;
-	ident: string;
-	normal: Function | undefined;
-	pitch: Function | undefined;
-	raw: boolean | undefined;
-	data: object | undefined;
-	pitchExecuted: boolean;
-	normalExecuted: boolean;
+export type LoaderContextCallback = (
+	err?: Error | null,
+	content?: string | Buffer,
+	sourceMap?: string | SourceMap,
+	additionalData?: AdditionalData
+) => void;
+
+export type ErrorWithDetails = Error & { details?: string };
+
+// aligned with https://github.com/webpack/webpack/blob/64e8e33151c3fabd3f1917851193e458a526e803/declarations/LoaderContext.d.ts#L19
+export type ResolveCallback = (
+	err: null | ErrorWithDetails,
+	res?: string | false,
+	req?: ResolveRequest
+) => void;
+
+export interface DiagnosticLocation {
+	/** Text for highlighting the location */
+	text?: string;
+	/** 1-based line */
+	line: number;
+	/** 0-based column in bytes */
+	column: number;
+	/** Length in bytes */
+	length: number;
+}
+
+export interface Diagnostic {
+	message: string;
+	help?: string;
+	sourceCode?: string;
+	/**
+	 * Location to the source code.
+	 *
+	 * If `sourceCode` is not provided, location will be omitted.
+	 */
+	location?: DiagnosticLocation;
+	file?: string;
+	severity: "error" | "warning";
+}
+
+interface LoaderExperiments {
+	emitDiagnostic(diagnostic: Diagnostic): void;
+}
+
+export interface ImportModuleOptions {
+	/**
+	 * Specify a layer in which this module is placed/compiled
+	 */
+	layer?: string;
+	/**
+	 * The public path used for the built modules
+	 */
+	publicPath?: PublicPath;
+	/**
+	 * Target base uri
+	 */
+	baseUri?: string;
 }
 
 export interface LoaderContext<OptionsType = {}> {
@@ -64,22 +116,12 @@ export interface LoaderContext<OptionsType = {}> {
 	resourcePath: string;
 	resourceQuery: string;
 	resourceFragment: string;
-	async(): (
-		err?: Error | null,
-		content?: string | Buffer,
-		sourceMap?: string | SourceMap,
-		additionalData?: AdditionalData
-	) => void;
-	callback(
-		err?: Error | null,
-		content?: string | Buffer,
-		sourceMap?: string | SourceMap,
-		additionalData?: AdditionalData
-	): void;
+	async(): LoaderContextCallback;
+	callback: LoaderContextCallback;
 	cacheable(cacheable?: boolean): void;
 	sourceMap: boolean;
 	rootContext: string;
-	context: string;
+	context: string | null;
 	loaderIndex: number;
 	remainingRequest: string;
 	currentRequest: string;
@@ -105,7 +147,11 @@ export interface LoaderContext<OptionsType = {}> {
 	 */
 	loaders: LoaderObject[];
 	mode?: Mode;
+	target?: Target;
 	hot?: boolean;
+	/**
+	 * @param schema To provide the best performance, Rspack does not perform the schema validation. If your loader requires schema validation, please call scheme-utils or zod on your own.
+	 */
 	getOptions(schema?: any): OptionsType;
 	resolve(
 		context: string,
@@ -118,7 +164,12 @@ export interface LoaderContext<OptionsType = {}> {
 	): void;
 	getResolve(
 		options: Resolve
-	): (context: any, request: any, callback: any) => Promise<any>;
+	):
+		| ((context: string, request: string, callback: ResolveCallback) => void)
+		| ((
+				context: string,
+				request: string
+		  ) => Promise<string | false | undefined>);
 	getLogger(name: string): Logger;
 	emitError(error: Error): void;
 	emitWarning(warning: Error): void;
@@ -137,7 +188,36 @@ export interface LoaderContext<OptionsType = {}> {
 	getContextDependencies(): string[];
 	getMissingDependencies(): string[];
 	addBuildDependency(file: string): void;
+
+	/**
+	 * Compile and execute a module at the build time.
+	 * This is an alternative lightweight solution for the child compiler.
+	 * `importModule` will return a Promise if no callback is provided.
+	 *
+	 * @example
+	 * ```ts
+	 * const modulePath = path.resolve(__dirname, 'some-module.ts');
+	 * const moduleExports = await this.importModule(modulePath, {
+	 *   // optional options
+	 * });
+	 * ```
+	 */
+	importModule<T = any>(
+		request: string,
+		options: ImportModuleOptions | undefined,
+		callback: (err?: null | Error, exports?: T) => any
+	): void;
+	importModule<T = any>(
+		request: string,
+		options?: ImportModuleOptions
+	): Promise<T>;
+
 	fs: any;
+	/**
+	 * This is an experimental API and maybe subject to change.
+	 * @experimental
+	 */
+	experiments: LoaderExperiments;
 	utils: {
 		absolutify: (context: string, request: string) => string;
 		contextify: (context: string, request: string) => string;
@@ -146,57 +226,37 @@ export interface LoaderContext<OptionsType = {}> {
 	query: string | OptionsType;
 	data: unknown;
 	_compiler: Compiler;
-	_compilation: Compiler["compilation"];
+	_compilation: Compilation;
+	_module: Module;
+
 	/**
-	 * Internal field for interoperability.
-	 * Do not use this in anywhere else.
+	 * Note: This is not a webpack public API, maybe removed in future.
+	 * Store some data from loader, and consume it from parser, it may be removed in the future
 	 *
 	 * @internal
 	 */
-	__internal__context: JsLoaderContext;
-	/**
-	 * Internal field for interoperability.
-	 * Do not use this in anywhere else.
-	 *
-	 * @internal
-	 */
-	__internal__pushNativeDiagnostics: (diagnostics: any) => void;
+	__internal__parseMeta: Record<string, string>;
 }
 
-export interface LoaderResult {
-	cacheable: boolean;
-	content: string | Buffer;
-	sourceMap?: string | SourceMap;
-	additionalData?: AdditionalData;
-	fileDependencies: string[];
-	contextDependencies: string[];
-	missingDependencies: string[];
-	buildDependencies: string[];
-}
-
-export interface LoaderDefinitionFunction<
+export type LoaderDefinitionFunction<
 	OptionsType = {},
 	ContextAdditions = {}
-> {
-	(
-		this: LoaderContext<OptionsType> & ContextAdditions,
-		content: string,
-		sourceMap?: string | SourceMap,
-		additionalData?: AdditionalData
-	): string | void | Buffer | Promise<string | Buffer>;
-}
+> = (
+	this: LoaderContext<OptionsType> & ContextAdditions,
+	content: string,
+	sourceMap?: string | SourceMap,
+	additionalData?: AdditionalData
+) => string | void | Buffer | Promise<string | Buffer>;
 
-export interface PitchLoaderDefinitionFunction<
+export type PitchLoaderDefinitionFunction<
 	OptionsType = {},
 	ContextAdditions = {}
-> {
-	(
-		this: LoaderContext<OptionsType> & ContextAdditions,
-		remainingRequest: string,
-		previousRequest: string,
-		data: object
-	): string | void | Buffer | Promise<string | Buffer>;
-}
+> = (
+	this: LoaderContext<OptionsType> & ContextAdditions,
+	remainingRequest: string,
+	previousRequest: string,
+	data: object
+) => string | void | Buffer | Promise<string | Buffer>;
 
 export type LoaderDefinition<
 	OptionsType = {},
@@ -226,35 +286,41 @@ type GetLoaderOptions = (
 	options: ComposeJsUseOptions
 ) => RuleSetLoaderWithOptions["options"];
 
-const getSassLoaderOptions: GetLoaderOptions = o => {
-	(o ??= {} as any).__exePath = require.resolve(
-		`sass-embedded-${process.platform}-${
-			process.arch
-		}/dart-sass-embedded/dart-sass-embedded${
-			process.platform === "win32" ? ".bat" : ""
-		}`
-	);
-	return o;
-};
+const getSwcLoaderOptions: GetLoaderOptions = (options, _) => {
+	if (options && typeof options === "object") {
+		// enable `disableAllLints` by default to reduce performance overhead
+		options.jsc ??= {};
+		options.jsc.experimental ??= {};
+		options.jsc.experimental.disableAllLints ??= true;
 
-const getSwcLoaderOptions: GetLoaderOptions = (o, options) => {
-	if (o && typeof o === "object" && o.rspackExperiments) {
-		let expr = o.rspackExperiments;
-		const contextPath = options.context!;
-		const production = options.mode === "production" || !options.mode;
-		if (expr.emotion) {
-			expr.emotion = resolveEmotion(expr.emotion, production);
-		}
-		if (expr.relay) {
-			expr.relay = resolveRelay(expr.relay, contextPath);
-		}
-		if (expr.import || expr.pluginImport) {
-			expr.import = resolvePluginImport(expr.import || expr.pluginImport);
-		}
-		if (expr.react) {
-			expr.react = resolveReact(expr.react);
+		// resolve `rspackExperiments.import` options
+		const { rspackExperiments } = options;
+		if (rspackExperiments) {
+			if (rspackExperiments.import || rspackExperiments.pluginImport) {
+				rspackExperiments.import = resolvePluginImport(
+					rspackExperiments.import || rspackExperiments.pluginImport
+				);
+			}
 		}
 	}
+	return options;
+};
+
+const getLightningcssLoaderOptions: GetLoaderOptions = (o, _) => {
+	if (o && typeof o === "object") {
+		if (typeof o.targets === "string") {
+			o.targets = [o.targets];
+		}
+
+		if (o.include && typeof o.include === "object") {
+			o.include = toFeatures(o.include as unknown as FeatureOptions);
+		}
+
+		if (o.exclude && typeof o.exclude === "object") {
+			o.exclude = toFeatures(o.exclude as unknown as FeatureOptions);
+		}
+	}
+
 	return o;
 };
 
@@ -263,18 +329,12 @@ function getBuiltinLoaderOptions(
 	o: RuleSetLoaderWithOptions["options"],
 	options: ComposeJsUseOptions
 ): RuleSetLoaderWithOptions["options"] {
-	if (identifier.startsWith(`${BUILTIN_LOADER_PREFIX}sass-loader`)) {
-		deprecatedWarn(
-			`'builtin:sass-loader' has been deprecated, please migrate to ${termlink(
-				"sass-loader",
-				"https://github.com/webpack-contrib/sass-loader"
-			)}`
-		);
-		return getSassLoaderOptions(o, options);
-	}
-
 	if (identifier.startsWith(`${BUILTIN_LOADER_PREFIX}swc-loader`)) {
 		return getSwcLoaderOptions(o, options);
+	}
+
+	if (identifier.startsWith(`${BUILTIN_LOADER_PREFIX}lightningcss-loader`)) {
+		return getLightningcssLoaderOptions(o, options);
 	}
 
 	return o;
@@ -290,17 +350,25 @@ function createRawModuleRuleUsesImpl(
 	}
 
 	return uses.map((use, index) => {
-		let o;
+		let o: string | undefined;
+		let isBuiltin = false;
 		if (use.loader.startsWith(BUILTIN_LOADER_PREFIX)) {
-			o = getBuiltinLoaderOptions(use.loader, use.options, options);
-			o = isNil(o) ? undefined : typeof o === "string" ? o : JSON.stringify(o);
+			const temp = getBuiltinLoaderOptions(use.loader, use.options, options);
+			// keep json with indent so miette can show pretty error
+			o = isNil(temp)
+				? undefined
+				: typeof temp === "string"
+					? temp
+					: JSON.stringify(temp, null, 2);
+			isBuiltin = true;
 		}
 
 		return {
 			loader: resolveStringifyLoaders(
 				use,
 				`${path}[${index}]`,
-				options.compiler
+				options.compiler,
+				isBuiltin
 			),
 			options: o
 		};
@@ -310,35 +378,49 @@ function createRawModuleRuleUsesImpl(
 function resolveStringifyLoaders(
 	use: RuleSetLoaderWithOptions,
 	path: string,
-	compiler: Compiler
+	compiler: Compiler,
+	isBuiltin: boolean
 ) {
 	const obj = parsePathQueryFragment(use.loader);
 	let ident: string | null = null;
 
-	if (use.options === null) obj.query = "";
-	else if (use.options === undefined) obj.query = "";
-	else if (typeof use.options === "string") obj.query = "?" + use.options;
-	else if (use.ident) obj.query = "??" + (ident = use.ident);
+	if (use.options === null) {
+	} else if (use.options === undefined) {
+	} else if (typeof use.options === "string") obj.query = `?${use.options}`;
+	else if (use.ident) obj.query = `??${(ident = use.ident)}`;
 	else if (typeof use.options === "object" && use.options.ident)
-		obj.query = "??" + (ident = use.options.ident);
-	else if (typeof use.options === "object") obj.query = "??" + (ident = path);
-	else obj.query = "?" + JSON.stringify(use.options);
+		obj.query = `??${(ident = use.options.ident)}`;
+	else if (typeof use.options === "object") obj.query = `??${(ident = path)}`;
+	else obj.query = `?${JSON.stringify(use.options)}`;
 
 	if (use.options && typeof use.options === "object") {
 		if (!ident) ident = "[[missing ident]]";
-		compiler.ruleSet.references.set(ident, use.options);
+		compiler.__internal__ruleSet.references.set(ident, use.options);
+		if (isBuiltin) {
+			compiler.__internal__ruleSet.builtinReferences.set(ident, use.options);
+		}
 	}
 
 	return obj.path + obj.query + obj.fragment;
 }
 
-export function isUseSourceMap(devtool: RawOptions["devtool"]): boolean {
+export function isUseSourceMap(
+	devtool: RspackOptionsNormalized["devtool"]
+): boolean {
+	if (!devtool) {
+		return false;
+	}
 	return (
 		devtool.includes("source-map") &&
 		(devtool.includes("module") || !devtool.includes("cheap"))
 	);
 }
 
-export function isUseSimpleSourceMap(devtool: RawOptions["devtool"]): boolean {
+export function isUseSimpleSourceMap(
+	devtool: RspackOptionsNormalized["devtool"]
+): boolean {
+	if (!devtool) {
+		return false;
+	}
 	return devtool.includes("source-map") && !isUseSourceMap(devtool);
 }
