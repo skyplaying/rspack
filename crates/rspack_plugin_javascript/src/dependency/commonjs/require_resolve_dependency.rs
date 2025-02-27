@@ -1,41 +1,35 @@
+use rspack_cacheable::{cacheable, cacheable_dyn};
 use rspack_core::{
-  module_id, ContextOptions, Dependency, DependencyCategory, DependencyId, DependencyTemplate,
-  DependencyType, ErrorSpan, ExtendedReferencedExport, ModuleDependency, ModuleGraph, RuntimeSpec,
-  TemplateContext, TemplateReplaceSource,
+  module_id, AsContextDependency, Compilation, Dependency, DependencyCategory, DependencyId,
+  DependencyRange, DependencyTemplate, DependencyType, ExtendedReferencedExport, FactorizeInfo,
+  ModuleDependency, ModuleGraph, RuntimeSpec, TemplateContext, TemplateReplaceSource,
 };
 
+#[cacheable]
 #[derive(Debug, Clone)]
 pub struct RequireResolveDependency {
-  pub start: u32,
-  pub end: u32,
   pub id: DependencyId,
   pub request: String,
   pub weak: bool,
-  span: ErrorSpan,
+  range: DependencyRange,
   optional: bool,
+  factorize_info: FactorizeInfo,
 }
 
 impl RequireResolveDependency {
-  pub fn new(
-    start: u32,
-    end: u32,
-    request: String,
-    weak: bool,
-    span: ErrorSpan,
-    optional: bool,
-  ) -> Self {
+  pub fn new(request: String, range: DependencyRange, weak: bool, optional: bool) -> Self {
     Self {
-      start,
-      end,
+      range,
       request,
       weak,
-      span,
-      id: DependencyId::new(),
       optional,
+      id: DependencyId::new(),
+      factorize_info: Default::default(),
     }
   }
 }
 
+#[cacheable_dyn]
 impl Dependency for RequireResolveDependency {
   fn id(&self) -> &DependencyId {
     &self.id
@@ -49,15 +43,24 @@ impl Dependency for RequireResolveDependency {
     &DependencyType::RequireResolve
   }
 
-  fn span(&self) -> Option<ErrorSpan> {
-    Some(self.span)
+  fn range(&self) -> Option<&DependencyRange> {
+    Some(&self.range)
   }
 
-  fn dependency_debug_name(&self) -> &'static str {
-    "RequireResolveDependency"
+  fn get_referenced_exports(
+    &self,
+    _module_graph: &ModuleGraph,
+    _runtime: Option<&RuntimeSpec>,
+  ) -> Vec<ExtendedReferencedExport> {
+    vec![]
+  }
+
+  fn could_affect_referencing_module(&self) -> rspack_core::AffectType {
+    rspack_core::AffectType::True
   }
 }
 
+#[cacheable_dyn]
 impl ModuleDependency for RequireResolveDependency {
   fn request(&self) -> &str {
     &self.request
@@ -71,10 +74,6 @@ impl ModuleDependency for RequireResolveDependency {
     self.weak
   }
 
-  fn options(&self) -> Option<&ContextOptions> {
-    None
-  }
-
   fn get_optional(&self) -> bool {
     self.optional
   }
@@ -83,15 +82,16 @@ impl ModuleDependency for RequireResolveDependency {
     self.request = request;
   }
 
-  fn get_referenced_exports(
-    &self,
-    _module_graph: &ModuleGraph,
-    _runtime: Option<&RuntimeSpec>,
-  ) -> Vec<ExtendedReferencedExport> {
-    vec![]
+  fn factorize_info(&self) -> &FactorizeInfo {
+    &self.factorize_info
+  }
+
+  fn factorize_info_mut(&mut self) -> &mut FactorizeInfo {
+    &mut self.factorize_info
   }
 }
 
+#[cacheable_dyn]
 impl DependencyTemplate for RequireResolveDependency {
   fn apply(
     &self,
@@ -99,8 +99,8 @@ impl DependencyTemplate for RequireResolveDependency {
     code_generatable_context: &mut TemplateContext,
   ) {
     source.replace(
-      self.start,
-      self.end,
+      self.range.start,
+      self.range.end,
       module_id(
         code_generatable_context.compilation,
         &self.id,
@@ -111,4 +111,18 @@ impl DependencyTemplate for RequireResolveDependency {
       None,
     );
   }
+
+  fn dependency_id(&self) -> Option<DependencyId> {
+    Some(self.id)
+  }
+
+  fn update_hash(
+    &self,
+    _hasher: &mut dyn std::hash::Hasher,
+    _compilation: &Compilation,
+    _runtime: Option<&RuntimeSpec>,
+  ) {
+  }
 }
+
+impl AsContextDependency for RequireResolveDependency {}

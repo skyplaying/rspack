@@ -7,31 +7,32 @@
  * Copyright (c) JS Foundation and other contributors
  * https://github.com/webpack/webpack/blob/main/LICENSE
  */
-import { Callback } from "tapable";
+import assert from "node:assert";
+import type { Callback } from "@rspack/lite-tapable";
+
 import type { Compilation, Compiler } from ".";
 import { Stats } from ".";
-import { WatchOptions } from "./config";
-import { FileSystemInfoEntry, Watcher } from "./util/fs";
-import assert from "assert";
+import type { WatchOptions } from "./config";
+import type { FileSystemInfoEntry, Watcher } from "./util/fs";
 
-class Watching {
+export class Watching {
 	watcher?: Watcher;
 	pausedWatcher?: Watcher;
 	compiler: Compiler;
-	handler: (error?: Error, stats?: Stats) => void;
+	handler: Callback<Error, Stats>;
 	callbacks: Callback<Error, void>[];
 	watchOptions: WatchOptions;
-	// @ts-expect-error
+	// @ts-expect-error  lastWatcherStartTime will be assigned with Date.now() during initialization
 	lastWatcherStartTime: number;
 	running: boolean;
 	blocked: boolean;
-	isBlocked?: () => boolean;
-	onChange?: () => void;
-	onInvalid?: () => void;
+	isBlocked: () => boolean;
+	onChange: () => void;
+	onInvalid: () => void;
 	invalid: boolean;
 	startTime?: number;
 	#invalidReported: boolean;
-	#closeCallbacks?: ((err?: Error) => void)[];
+	#closeCallbacks?: ((err?: Error | null) => void)[];
 	#initial: boolean;
 	#closed: boolean;
 	#collectedChangedFiles?: Set<string>;
@@ -41,7 +42,7 @@ class Watching {
 	constructor(
 		compiler: Compiler,
 		watchOptions: WatchOptions,
-		handler: (error?: Error, stats?: Stats) => void
+		handler: Callback<Error, Stats>
 	) {
 		this.callbacks = [];
 		this.invalid = false;
@@ -58,6 +59,16 @@ class Watching {
 		this.handler = handler;
 		this.suspended = false;
 
+		// The default aggregateTimeout of watchpack is 200ms,
+		// using smaller values can improve HMR performance
+		if (typeof this.watchOptions.aggregateTimeout !== "number") {
+			this.watchOptions.aggregateTimeout = 5;
+		}
+		// Ignore watching files in node_modules to reduce memory usage and make startup faster
+		if (this.watchOptions.ignored === undefined) {
+			this.watchOptions.ignored = /[\\/](?:\.git|node_modules)[\\/]/;
+		}
+
 		process.nextTick(() => {
 			if (this.#initial) this.#invalidate();
 		});
@@ -69,7 +80,8 @@ class Watching {
 		missing: Iterable<string>
 	) {
 		this.pausedWatcher = undefined;
-		this.watcher = this.compiler.watchFileSystem.watch(
+		// SAFETY: `watchFileSystem` is expected to be initialized.
+		this.watcher = this.compiler.watchFileSystem!.watch(
 			files,
 			dirs,
 			missing,
@@ -83,6 +95,8 @@ class Watching {
 				removedFiles
 			) => {
 				if (err) {
+					this.compiler.fileTimestamps = undefined;
+					this.compiler.contextTimestamps = undefined;
 					this.compiler.modifiedFiles = undefined;
 					this.compiler.removedFiles = undefined;
 					return this.handler(err);
@@ -93,7 +107,6 @@ class Watching {
 					changedFiles,
 					removedFiles
 				);
-				// @ts-expect-error
 				this.onChange();
 			},
 			(fileName, changeTime) => {
@@ -101,7 +114,6 @@ class Watching {
 					this.#invalidReported = true;
 					this.compiler.hooks.invalid.call(fileName, changeTime);
 				}
-				// @ts-expect-error
 				this.onInvalid();
 			}
 		);
@@ -122,14 +134,13 @@ class Watching {
 			this.compiler.watchMode = false;
 			this.compiler.modifiedFiles = undefined;
 			this.compiler.removedFiles = undefined;
-			// this.compiler.fileTimestamps = undefined;
-			// this.compiler.contextTimestamps = undefined;
+			this.compiler.fileTimestamps = undefined;
+			this.compiler.contextTimestamps = undefined;
 			// this.compiler.fsStartTime = undefined;
-			const shutdown = (err: Error) => {
+			const shutdown = (err: Error | null) => {
 				this.compiler.hooks.watchClose.call();
-				const closeCallbacks = this.#closeCallbacks;
+				const closeCallbacks = this.#closeCallbacks!;
 				this.#closeCallbacks = undefined;
-				// @ts-expect-error
 				for (const cb of closeCallbacks) cb(err);
 			};
 			// TODO: compilation parameter support
@@ -146,7 +157,6 @@ class Watching {
 			// } else {
 			// 	shutdown(err);
 			// }
-			// @ts-expect-error
 			shutdown(err);
 		};
 
@@ -182,9 +192,12 @@ class Watching {
 			this.#invalidReported = true;
 			this.compiler.hooks.invalid.call(null, Date.now());
 		}
-		// @ts-expect-error
 		this.onChange();
 		this.#invalidate();
+	}
+
+	lazyCompilationInvalidate(files: Set<string>) {
+		this.#invalidate(new Map(), new Map(), files, new Set());
 	}
 
 	#invalidate(
@@ -193,9 +206,7 @@ class Watching {
 		changedFiles?: Set<string>,
 		removedFiles?: Set<string>
 	) {
-		// @ts-expect-error
 		this.#mergeWithCollected(changedFiles, removedFiles);
-		// @ts-expect-error
 		if (this.suspended || (this.isBlocked() && (this.blocked = true))) {
 			return;
 		}
@@ -205,10 +216,24 @@ class Watching {
 			return;
 		}
 
-		this.#go(changedFiles, removedFiles);
+		this.#go(
+			fileTimeInfoEntries,
+			contextTimeInfoEntries,
+			changedFiles,
+			removedFiles
+		);
 	}
 
-	#go(changedFiles?: ReadonlySet<string>, removedFiles?: ReadonlySet<string>) {
+	#go(
+		fileTimeInfoEntries?: ReadonlyMap<string, FileSystemInfoEntry | "ignore">,
+		contextTimeInfoEntries?: ReadonlyMap<
+			string,
+			FileSystemInfoEntry | "ignore"
+		>,
+		changedFiles?: ReadonlySet<string>,
+		removedFiles?: ReadonlySet<string>
+	) {
+		this.#initial = false;
 		if (this.startTime === undefined) this.startTime = Date.now();
 		this.running = true;
 		if (this.watcher) {
@@ -220,41 +245,61 @@ class Watching {
 			this.lastWatcherStartTime = Date.now();
 		}
 
-		if (changedFiles && removedFiles) {
+		if (
+			fileTimeInfoEntries &&
+			contextTimeInfoEntries &&
+			changedFiles &&
+			removedFiles
+		) {
 			this.#mergeWithCollected(changedFiles, removedFiles);
+			this.compiler.fileTimestamps = fileTimeInfoEntries;
+			this.compiler.contextTimestamps = contextTimeInfoEntries;
 		} else if (this.pausedWatcher) {
-			const { changes, removals } = this.pausedWatcher.getInfo();
+			const { changes, removals, fileTimeInfoEntries, contextTimeInfoEntries } =
+				this.pausedWatcher.getInfo();
 			this.#mergeWithCollected(changes, removals);
+			this.compiler.fileTimestamps = fileTimeInfoEntries;
+			this.compiler.contextTimestamps = contextTimeInfoEntries;
 		}
 
-		const modifiedFiles = (this.compiler.modifiedFiles =
-			this.#collectedChangedFiles);
-		const deleteFiles = (this.compiler.removedFiles =
-			this.#collectedRemovedFiles);
+		this.compiler.modifiedFiles = this.#collectedChangedFiles;
+		this.compiler.removedFiles = this.#collectedRemovedFiles;
 		this.#collectedChangedFiles = undefined;
 		this.#collectedRemovedFiles = undefined;
 		this.invalid = false;
 		this.#invalidReported = false;
 		this.compiler.hooks.watchRun.callAsync(this.compiler, err => {
-			if (err) return this._done(err, null);
+			if (err) return this._done(err);
 
-			const canRebuild =
-				this.compiler.options.devServer &&
-				!this.#initial &&
-				(modifiedFiles?.size || deleteFiles?.size);
+			const onCompiled = (
+				err: Error | null,
+				_compilation: Compilation | undefined
+			) => {
+				if (err) return this._done(err);
 
-			const onBuild = (err: Error | null) => {
-				if (err) return this._done(err, null);
-				// if (this.invalid) return this._done(null);
-				this._done(null, this.compiler.compilation);
+				const compilation = _compilation!;
+
+				const needAdditionalPass = compilation.hooks.needAdditionalPass.call();
+				if (needAdditionalPass) {
+					compilation.needAdditionalPass = true;
+
+					compilation.startTime = this.startTime;
+					compilation.endTime = Date.now();
+					const stats = new Stats(compilation);
+					this.compiler.hooks.done.callAsync(stats, err => {
+						if (err) return this._done(err, compilation);
+
+						this.compiler.hooks.additionalPass.callAsync(err => {
+							if (err) return this._done(err, compilation);
+							this.compiler.compile(onCompiled);
+						});
+					});
+					return;
+				}
+				this._done(null, this.compiler._lastCompilation!);
 			};
 
-			if (canRebuild) {
-				this.compiler.rebuild(modifiedFiles, deleteFiles, onBuild as any);
-			} else {
-				this.compiler.build(onBuild);
-				this.#initial = false;
-			}
+			this.compiler.compile(onCompiled);
 		});
 	}
 
@@ -262,9 +307,7 @@ class Watching {
 	 * The reason why this is _done instead of #done, is that in Webpack,
 	 * it will rewrite this function to another function
 	 */
-	private _done(error: Error, compilation: null): void;
-	private _done(error: null, compilation: Compilation): void;
-	private _done(error: Error | null, compilation: Compilation | null) {
+	private _done(error: Error | null, compilation?: Compilation) {
 		this.running = false;
 		let stats: undefined | Stats = undefined;
 
@@ -273,38 +316,51 @@ class Watching {
 			// this.compiler.cache.beginIdle();
 			// this.compiler.idle = true;
 			this.handler(err, stats);
-			if (!cbs) {
-				cbs = this.callbacks;
-				this.callbacks = [];
+
+			const callbacksToExecute = cbs || this.callbacks.splice(0);
+			for (const cb of callbacksToExecute) {
+				cb(err);
 			}
-			for (const cb of cbs) cb(err);
 		};
 
-		const cbs = this.callbacks;
-		this.callbacks = [];
-		const startTime = this.startTime; // store last startTime for compilation
-		// reset startTime for next compilation, before throwing error
-		this.startTime = undefined;
 		if (error) {
 			return handleError(error);
 		}
 		assert(compilation);
 
+		stats = new Stats(compilation);
+
+		if (
+			this.invalid &&
+			!this.suspended &&
+			!this.blocked &&
+			!(this.isBlocked() && (this.blocked = true))
+		) {
+			this.#go();
+			return;
+		}
+
+		const startTime = this.startTime; // store last startTime for compilation
+		// reset startTime for next compilation, before throwing error
+		this.startTime = undefined;
 		compilation.startTime = startTime;
 		compilation.endTime = Date.now();
-		stats = new Stats(compilation);
+		const cbs = this.callbacks;
+		this.callbacks = [];
+		const fileDependencies = new Set([...compilation.fileDependencies]);
+		const contextDependencies = new Set([...compilation.contextDependencies]);
+		const missingDependencies = new Set([...compilation.missingDependencies]);
 
 		this.compiler.hooks.done.callAsync(stats, err => {
 			if (err) return handleError(err, cbs);
-			// @ts-expect-error
 			this.handler(null, stats);
 
 			process.nextTick(() => {
 				if (!this.#closed) {
 					this.watch(
-						compilation.fileDependencies,
-						compilation.contextDependencies,
-						compilation.missingDependencies
+						fileDependencies,
+						contextDependencies,
+						missingDependencies
 					);
 				}
 			});
@@ -314,22 +370,21 @@ class Watching {
 	}
 
 	#mergeWithCollected(
-		changedFiles: ReadonlySet<string>,
-		removedFiles: ReadonlySet<string>
+		changedFiles?: ReadonlySet<string>,
+		removedFiles?: ReadonlySet<string>
 	) {
 		if (!changedFiles) return;
-		if (!this.#collectedChangedFiles) {
+		if (!removedFiles) return;
+		if (!this.#collectedChangedFiles || !this.#collectedRemovedFiles) {
 			this.#collectedChangedFiles = new Set(changedFiles);
 			this.#collectedRemovedFiles = new Set(removedFiles);
 		} else {
 			for (const file of changedFiles) {
 				this.#collectedChangedFiles.add(file);
-				// @ts-expect-error
 				this.#collectedRemovedFiles.delete(file);
 			}
 			for (const file of removedFiles) {
 				this.#collectedChangedFiles.delete(file);
-				// @ts-expect-error
 				this.#collectedRemovedFiles.add(file);
 			}
 		}
@@ -346,5 +401,3 @@ class Watching {
 		}
 	}
 }
-
-export default Watching;

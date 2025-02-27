@@ -1,27 +1,24 @@
+use rspack_collections::Identifier;
 use rspack_core::{
-  rspack_sources::{BoxSource, RawSource, SourceExt},
+  impl_runtime_module,
+  rspack_sources::{BoxSource, RawStringSource, SourceExt},
   ChunkUkey, Compilation, RuntimeGlobals, RuntimeModule,
 };
-use rspack_identifier::Identifier;
 
-use crate::impl_runtime_module;
-
-#[derive(Debug, Eq)]
+#[impl_runtime_module]
+#[derive(Debug)]
 pub struct BaseUriRuntimeModule {
   id: Identifier,
   chunk: Option<ChunkUkey>,
 }
 impl Default for BaseUriRuntimeModule {
   fn default() -> Self {
-    BaseUriRuntimeModule {
-      id: Identifier::from("webpack/runtime/base_uri"),
-      chunk: None,
-    }
+    Self::with_default(Identifier::from("webpack/runtime/base_uri"), None)
   }
 }
 
 impl RuntimeModule for BaseUriRuntimeModule {
-  fn generate(&self, compilation: &Compilation) -> BoxSource {
+  fn generate(&self, compilation: &Compilation) -> rspack_error::Result<BoxSource> {
     let base_uri = self
       .chunk
       .and_then(|ukey| compilation.chunk_by_ukey.get(&ukey))
@@ -29,7 +26,7 @@ impl RuntimeModule for BaseUriRuntimeModule {
       .and_then(|options| options.base_uri.as_ref())
       .and_then(|base_uri| serde_json::to_string(base_uri).ok())
       .unwrap_or_else(|| "undefined".to_string());
-    RawSource::from(format!("{} = {};\n", RuntimeGlobals::BASE_URI, base_uri)).boxed()
+    Ok(RawStringSource::from(format!("{} = {};\n", RuntimeGlobals::BASE_URI, base_uri)).boxed())
   }
 
   fn name(&self) -> Identifier {
@@ -40,4 +37,3 @@ impl RuntimeModule for BaseUriRuntimeModule {
     self.chunk = Some(chunk);
   }
 }
-impl_runtime_module!(BaseUriRuntimeModule);

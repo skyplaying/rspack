@@ -1,21 +1,19 @@
+use rspack_collections::Identifier;
 use rspack_core::{
-  rspack_sources::{BoxSource, RawSource, SourceExt},
+  impl_runtime_module,
+  rspack_sources::{BoxSource, RawStringSource, SourceExt},
   Compilation, RuntimeModule,
 };
-use rspack_identifier::Identifier;
 
-use crate::impl_runtime_module;
-
-#[derive(Debug, Eq)]
+#[impl_runtime_module]
+#[derive(Debug)]
 pub struct NodeModuleDecoratorRuntimeModule {
   id: Identifier,
 }
 
 impl Default for NodeModuleDecoratorRuntimeModule {
   fn default() -> Self {
-    Self {
-      id: Identifier::from("webpack/runtime/node_module_decorator"),
-    }
+    Self::with_default(Identifier::from("webpack/runtime/node_module_decorator"))
   }
 }
 
@@ -24,9 +22,7 @@ impl RuntimeModule for NodeModuleDecoratorRuntimeModule {
     self.id
   }
 
-  fn generate(&self, _compilation: &Compilation) -> BoxSource {
-    RawSource::from(include_str!("runtime/node_module_decorator.js")).boxed()
+  fn generate(&self, _compilation: &Compilation) -> rspack_error::Result<BoxSource> {
+    Ok(RawStringSource::from_static(include_str!("runtime/node_module_decorator.js")).boxed())
   }
 }
-
-impl_runtime_module!(NodeModuleDecoratorRuntimeModule);

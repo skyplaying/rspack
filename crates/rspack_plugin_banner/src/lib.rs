@@ -1,53 +1,20 @@
 #![feature(let_chains)]
 
 use std::fmt::{self, Debug};
+use std::sync::LazyLock;
 
-use async_recursion::async_recursion;
-use async_trait::async_trait;
+use cow_utils::CowUtils;
 use futures::future::BoxFuture;
-use once_cell::sync::Lazy;
 use regex::Regex;
 use rspack_core::{
-  rspack_sources::{BoxSource, ConcatSource, RawSource, SourceExt},
-  to_comment, Chunk, Filename, Logger, PathData, Plugin,
+  rspack_sources::{BoxSource, ConcatSource, RawStringSource, SourceExt},
+  to_comment, Chunk, Compilation, CompilationProcessAssets, FilenameTemplate, Logger, PathData,
+  Plugin,
 };
 use rspack_error::Result;
-use rspack_regex::RspackRegex;
-use rspack_util::try_any;
-
-#[derive(Debug)]
-pub enum BannerRule {
-  String(String),
-  Regexp(RspackRegex),
-}
-
-#[derive(Debug)]
-pub enum BannerRules {
-  String(String),
-  Regexp(RspackRegex),
-  Array(Vec<BannerRule>),
-}
-
-impl BannerRule {
-  #[async_recursion]
-  pub async fn try_match(&self, data: &str) -> Result<bool> {
-    match self {
-      Self::String(s) => Ok(data.starts_with(s)),
-      Self::Regexp(r) => Ok(r.test(data)),
-    }
-  }
-}
-
-impl BannerRules {
-  #[async_recursion]
-  pub async fn try_match(&self, data: &str) -> Result<bool> {
-    match self {
-      Self::String(s) => Ok(data.starts_with(s)),
-      Self::Regexp(r) => Ok(r.test(data)),
-      Self::Array(l) => try_any(l, |i| async { i.try_match(data).await }).await,
-    }
-  }
-}
+use rspack_hook::{plugin, plugin_hook};
+use rspack_util::asset_condition::AssetConditions;
+use rspack_util::infallible::ResultInfallibleExt as _;
 
 #[derive(Debug)]
 pub struct BannerPluginOptions {
@@ -60,17 +27,20 @@ pub struct BannerPluginOptions {
   // If true, banner will not be wrapped in a comment.
   pub raw: Option<bool>,
   // Include all modules that pass test assertion.
-  pub test: Option<BannerRules>,
+  pub test: Option<AssetConditions>,
   // Include all modules matching any of these conditions.
-  pub include: Option<BannerRules>,
+  pub include: Option<AssetConditions>,
   // Exclude all modules matching any of these conditions.
-  pub exclude: Option<BannerRules>,
+  pub exclude: Option<AssetConditions>,
+  // Specifies the stage of banner.
+  pub stage: Option<i32>,
 }
 
 pub struct BannerContentFnCtx<'a> {
   pub hash: &'a str,
   pub chunk: &'a Chunk,
   pub filename: &'a str,
+  pub compilation: &'a Compilation,
 }
 
 pub type BannerContentFn =
@@ -90,28 +60,27 @@ impl fmt::Debug for BannerContent {
   }
 }
 
-#[async_recursion]
-async fn match_object(obj: &BannerPluginOptions, str: &str) -> Result<bool> {
+fn match_object(obj: &BannerPluginOptions, str: &str) -> bool {
   if let Some(condition) = &obj.test {
-    if !condition.try_match(str).await? {
-      return Ok(false);
+    if !condition.try_match(str) {
+      return false;
     }
   }
   if let Some(condition) = &obj.include {
-    if !condition.try_match(str).await? {
-      return Ok(false);
+    if !condition.try_match(str) {
+      return false;
     }
   }
   if let Some(condition) = &obj.exclude {
-    if condition.try_match(str).await? {
-      return Ok(false);
+    if condition.try_match(str) {
+      return false;
     }
   }
-  Ok(true)
+  true
 }
 
-static TRIALING_WHITESPACE: Lazy<Regex> =
-  Lazy::new(|| Regex::new(r"\s+\n").expect("invalid regexp"));
+static TRIALING_WHITESPACE: LazyLock<Regex> =
+  LazyLock::new(|| Regex::new(r"\s+\n").expect("invalid regexp"));
 
 fn wrap_comment(str: &str) -> String {
   if !str.contains('\n') {
@@ -119,7 +88,7 @@ fn wrap_comment(str: &str) -> String {
   }
 
   let result = str
-    .replace("*/", "* /")
+    .cow_replace("*/", "* /")
     .split('\n')
     .collect::<Vec<_>>()
     .join("\n * ");
@@ -129,6 +98,7 @@ fn wrap_comment(str: &str) -> String {
   format!("/*!\n * {}\n */", result)
 }
 
+#[plugin]
 #[derive(Debug)]
 pub struct BannerPlugin {
   config: BannerPluginOptions,
@@ -136,7 +106,7 @@ pub struct BannerPlugin {
 
 impl BannerPlugin {
   pub fn new(config: BannerPluginOptions) -> Self {
-    Self { config }
+    Self::new_inner(config)
   }
 
   fn wrap_comment(&self, value: &str) -> String {
@@ -150,89 +120,119 @@ impl BannerPlugin {
   fn update_source(&self, comment: String, old: BoxSource, footer: Option<bool>) -> BoxSource {
     let old_source = old.to_owned();
 
-    if let Some(footer) = footer && footer {
+    if let Some(footer) = footer
+      && footer
+    {
       ConcatSource::new([
         old_source,
-        RawSource::from("\n").boxed(),
-        RawSource::from(comment).boxed(),
-      ]).boxed()
+        RawStringSource::from_static("\n").boxed(),
+        RawStringSource::from(comment).boxed(),
+      ])
+      .boxed()
     } else {
       ConcatSource::new([
-        RawSource::from(comment).boxed(),
-        RawSource::from("\n").boxed(),
-        old_source
-      ]).boxed()
+        RawStringSource::from(comment).boxed(),
+        RawStringSource::from_static("\n").boxed(),
+        old_source,
+      ])
+      .boxed()
     }
   }
 }
 
-#[async_trait]
+#[plugin_hook(CompilationProcessAssets for BannerPlugin, stage = self.config.stage.unwrap_or(Compilation::PROCESS_ASSETS_STAGE_ADDITIONS))]
+async fn process_assets(&self, compilation: &mut Compilation) -> Result<()> {
+  let logger = compilation.get_logger("rspack.BannerPlugin");
+  let start = logger.time("add banner");
+  let mut updates = vec![];
+
+  // filter file
+  for chunk in compilation.chunk_by_ukey.values() {
+    let can_be_initial = chunk.can_be_initial(&compilation.chunk_group_by_ukey);
+
+    if let Some(entry_only) = self.config.entry_only
+      && entry_only
+      && !can_be_initial
+    {
+      continue;
+    }
+
+    for file in chunk.files() {
+      let is_match = match_object(&self.config, file);
+
+      if !is_match {
+        continue;
+      }
+      // add comment to the matched file
+      let hash = compilation
+        .hash
+        .as_ref()
+        .expect("should have compilation.hash in process_assets hook")
+        .encoded()
+        .to_owned();
+      // todo: support placeholder, such as [fullhash]、[chunkhash]
+      let banner = match &self.config.banner {
+        BannerContent::String(content) => self.wrap_comment(content),
+        BannerContent::Fn(func) => {
+          let res = func(BannerContentFnCtx {
+            hash: &hash,
+            chunk,
+            filename: file,
+            compilation,
+          })
+          .await?;
+          self.wrap_comment(&res)
+        }
+      };
+      let comment = compilation
+        .get_path(
+          &FilenameTemplate::from(banner),
+          PathData::default()
+            .chunk_hash_optional(chunk.rendered_hash(
+              &compilation.chunk_hashes_artifact,
+              compilation.options.output.hash_digest_length,
+            ))
+            .chunk_id_optional(
+              chunk
+                .id(&compilation.chunk_ids_artifact)
+                .map(|id| id.as_str()),
+            )
+            .chunk_name_optional(chunk.name_for_filename_template(&compilation.chunk_ids_artifact))
+            .hash(&hash)
+            .filename(file),
+        )
+        .always_ok();
+      updates.push((file.clone(), comment));
+    }
+  }
+
+  for (file, comment) in updates {
+    let _res = compilation.update_asset(file.as_str(), |old, info| {
+      let new = self.update_source(comment, old, self.config.footer);
+      Ok((new, info))
+    });
+  }
+
+  logger.time_end(start);
+
+  Ok(())
+}
+
 impl Plugin for BannerPlugin {
   fn name(&self) -> &'static str {
     "rspack.BannerPlugin"
   }
 
-  async fn process_assets_stage_additions(
+  fn apply(
     &self,
-    _ctx: rspack_core::PluginContext,
-    args: rspack_core::ProcessAssetsArgs<'_>,
-  ) -> rspack_core::PluginProcessAssetsOutput {
-    let compilation = args.compilation;
-    let logger = compilation.get_logger(self.name());
-    let start = logger.time("add banner");
-    let mut updates = vec![];
-
-    // filter file
-    for chunk in compilation.chunk_by_ukey.values() {
-      let can_be_initial = chunk.can_be_initial(&compilation.chunk_group_by_ukey);
-
-      if let Some(entry_only) = self.config.entry_only && entry_only && !can_be_initial {
-        continue;
-      }
-
-      for file in &chunk.files {
-        let is_match = match_object(&self.config, file).await.unwrap_or(false);
-
-        if !is_match {
-          continue;
-        }
-        // add comment to the matched file
-        let hash = compilation
-          .hash
-          .as_ref()
-          .expect("should have compilation.hash in process_assets hook")
-          .encoded()
-          .to_owned();
-        // todo: support placeholder, such as [fullhash]、[chunkhash]
-        let banner = match &self.config.banner {
-          BannerContent::String(content) => self.wrap_comment(content),
-          BannerContent::Fn(func) => {
-            let res = func(BannerContentFnCtx {
-              hash: &hash,
-              chunk,
-              filename: file,
-            })
-            .await?;
-            self.wrap_comment(&res)
-          }
-        };
-        let comment = compilation.get_path(
-          &Filename::from(banner),
-          PathData::default().chunk(chunk).hash(&hash).filename(file),
-        );
-        updates.push((file.clone(), comment));
-      }
-    }
-
-    for (file, comment) in updates {
-      let _res = compilation.update_asset(file.as_str(), |old, info| {
-        let new = self.update_source(comment, old, self.config.footer);
-        Ok((new, info))
-      });
-    }
-
-    logger.time_end(start);
-
+    ctx: rspack_core::PluginContext<&mut rspack_core::ApplyContext>,
+    _options: &rspack_core::CompilerOptions,
+  ) -> Result<()> {
+    ctx
+      .context
+      .compilation_hooks
+      .process_assets
+      .tap(process_assets::new(self));
     Ok(())
   }
 }

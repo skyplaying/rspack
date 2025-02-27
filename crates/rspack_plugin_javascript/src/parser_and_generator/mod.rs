@@ -1,235 +1,271 @@
-use rspack_ast::RspackAst;
-use rspack_core::rspack_sources::{
-  BoxSource, MapOptions, OriginalSource, RawSource, ReplaceSource, Source, SourceExt, SourceMap,
-  SourceMapSource, SourceMapSourceOptions,
-};
-use rspack_core::tree_shaking::analyzer::OptimizeAnalyzer;
-use rspack_core::tree_shaking::js_module::JsModule;
-use rspack_core::tree_shaking::visitor::OptimizeAnalyzeResult;
+use std::borrow::Cow;
+use std::sync::Arc;
+
+use itertools::Itertools;
+use rspack_cacheable::with::Skip;
+use rspack_cacheable::{cacheable, cacheable_dyn};
+use rspack_core::diagnostics::map_box_diagnostics_to_module_parse_diagnostics;
+use rspack_core::rspack_sources::{BoxSource, ReplaceSource, Source, SourceExt};
 use rspack_core::{
-  render_init_fragments, GenerateContext, Module, ParseContext, ParseResult, ParserAndGenerator,
-  SourceType, TemplateContext,
+  remove_bom, render_init_fragments, AsyncDependenciesBlockIdentifier, BuildMetaExportsType,
+  ChunkGraph, Compilation, DependenciesBlock, DependencyId, DependencyRange, GenerateContext,
+  Module, ModuleGraph, ModuleType, ParseContext, ParseResult, ParserAndGenerator,
+  SideEffectsBailoutItem, SourceType, TemplateContext, TemplateReplaceSource,
 };
-use rspack_error::{internal_error, IntoTWithDiagnosticArray, Result, TWithDiagnosticArray};
-use swc_core::common::SyntaxContext;
+use rspack_error::miette::Diagnostic;
+use rspack_error::{DiagnosticExt, IntoTWithDiagnosticArray, Result, TWithDiagnosticArray};
+use swc_core::common::comments::Comments;
+use swc_core::common::input::SourceFileInput;
+use swc_core::common::{FileName, SyntaxContext};
+use swc_core::ecma::ast;
+use swc_core::ecma::parser::{lexer::Lexer, EsSyntax, Syntax};
+use swc_node_comments::SwcComments;
 
-use crate::ast::CodegenOptions;
-use crate::inner_graph_plugin::InnerGraphPlugin;
-use crate::utils::syntax_by_module_type;
-use crate::visitors::ScanDependenciesResult;
-use crate::visitors::{run_before_pass, scan_dependencies, swc_visitor::resolver};
-use crate::{SideEffectsFlagPluginVisitor, SyntaxContextInfo};
-#[derive(Debug)]
-pub struct JavaScriptParserAndGenerator;
+use crate::dependency::ESMCompatibilityDependency;
+use crate::visitors::{scan_dependencies, swc_visitor::resolver};
+use crate::visitors::{semicolon, ScanDependenciesResult};
+use crate::{BoxJavascriptParserPlugin, SideEffectsFlagPluginVisitor, SyntaxContextInfo};
 
-#[allow(unused)]
+#[cacheable]
+#[derive(Default)]
+pub struct JavaScriptParserAndGenerator {
+  // TODO
+  #[cacheable(with=Skip)]
+  parser_plugins: Vec<BoxJavascriptParserPlugin>,
+}
+
+impl std::fmt::Debug for JavaScriptParserAndGenerator {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("JavaScriptParserAndGenerator")
+      .field("parser_plugins", &"...")
+      .finish()
+  }
+}
+
 impl JavaScriptParserAndGenerator {
-  pub(crate) fn new() -> Self {
-    Self {}
+  pub fn add_parser_plugin(&mut self, parser_plugin: BoxJavascriptParserPlugin) {
+    self.parser_plugins.push(parser_plugin);
+  }
+
+  fn source_block(
+    &self,
+    compilation: &Compilation,
+    block_id: &AsyncDependenciesBlockIdentifier,
+    source: &mut TemplateReplaceSource,
+    context: &mut TemplateContext,
+  ) {
+    let module_graph = compilation.get_module_graph();
+    let block = module_graph
+      .block_by_id(block_id)
+      .expect("should have block");
+    //    let block = block_id.expect_get(compilation);
+    block.get_dependencies().iter().for_each(|dependency_id| {
+      self.source_dependency(compilation, dependency_id, source, context)
+    });
+    block
+      .get_blocks()
+      .iter()
+      .for_each(|block_id| self.source_block(compilation, block_id, source, context));
+  }
+
+  fn source_dependency(
+    &self,
+    compilation: &Compilation,
+    dependency_id: &DependencyId,
+    source: &mut TemplateReplaceSource,
+    context: &mut TemplateContext,
+  ) {
+    if let Some(dependency) = compilation
+      .get_module_graph()
+      .dependency_by_id(dependency_id)
+      .expect("should have dependency")
+      .as_dependency_template()
+    {
+      dependency.apply(source, context)
+    }
   }
 }
 
 static SOURCE_TYPES: &[SourceType; 1] = &[SourceType::JavaScript];
 
+#[cacheable_dyn]
 impl ParserAndGenerator for JavaScriptParserAndGenerator {
   fn source_types(&self) -> &[SourceType] {
     SOURCE_TYPES
   }
 
-  fn size(&self, module: &dyn Module, _source_type: &SourceType) -> f64 {
-    module.original_source().map_or(0, |source| source.size()) as f64
+  fn size(&self, module: &dyn Module, _source_type: Option<&SourceType>) -> f64 {
+    module.source().map_or(0, |source| source.size()) as f64
   }
 
+  #[tracing::instrument("JavaScriptParser:parse", skip_all)]
   fn parse(&mut self, parse_context: ParseContext) -> Result<TWithDiagnosticArray<ParseResult>> {
     let ParseContext {
       source,
       module_type,
+      module_layer,
       resource_data,
       compiler_options,
       build_info,
       build_meta,
       module_identifier,
-      mut additional_data,
+      loaders,
+      module_parser_options,
+      additional_data,
+      parse_meta,
       ..
     } = parse_context;
+    let mut diagnostics: Vec<Box<dyn Diagnostic + Send + Sync>> = vec![];
 
-    let syntax = syntax_by_module_type(
-      &resource_data.resource_path,
-      module_type,
-      compiler_options.builtins.decorator.is_some(),
-      compiler_options.should_transform_by_default(),
-    );
-    let use_source_map = compiler_options.devtool.enabled();
-    let use_simple_source_map = compiler_options.devtool.source_map();
-    let original_map = source.map(&MapOptions::new(!compiler_options.devtool.cheap()));
-    let source = source.source();
-
-    macro_rules! bail {
-      ($e:expr) => {{
-        return Ok(
+    let default_with_diagnostics =
+      |source: Arc<dyn Source>, diagnostics: Vec<Box<dyn Diagnostic + Send + Sync>>| {
+        Ok(
           ParseResult {
-            source: create_source(
-              source.to_string(),
-              resource_data.resource_path.to_string_lossy().to_string(),
-              use_simple_source_map,
-            ),
+            source,
             dependencies: vec![],
+            blocks: vec![],
             presentational_dependencies: vec![],
-            analyze_result: Default::default(),
+            code_generation_dependencies: vec![],
+            side_effects_bailout: None,
           }
-          .with_diagnostic($e.into()),
-        );
-      }};
-    }
-
-    let mut ast =
-      if let Some(RspackAst::JavaScript(loader_ast)) = additional_data.remove::<RspackAst>() {
-        loader_ast
-      } else {
-        match crate::ast::parse(
-          source.to_string(),
-          syntax,
-          &resource_data.resource_path.to_string_lossy(),
-          module_type,
-        ) {
-          Ok(ast) => ast,
-          Err(e) => bail!(e),
-        }
+          .with_diagnostic(map_box_diagnostics_to_module_parse_diagnostics(
+            diagnostics,
+            loaders,
+          )),
+        )
       };
 
-    run_before_pass(
-      resource_data,
-      &mut ast,
-      compiler_options,
-      syntax,
-      build_info,
-      module_type,
-      &source,
-    )?;
+    let source = remove_bom(source);
+    let cm: Arc<swc_core::common::SourceMap> = Default::default();
+    let fm = cm.new_source_file(
+      Arc::new(FileName::Custom(
+        resource_data
+          .resource_path
+          .as_ref()
+          .map(|p| p.as_str().to_string())
+          .unwrap_or_default(),
+      )),
+      source.source().to_string(),
+    );
+    let comments = SwcComments::default();
+    let target = ast::EsVersion::EsNext;
+    let lexer = Lexer::new(
+      Syntax::Es(EsSyntax {
+        allow_return_outside_function: matches!(
+          module_type,
+          ModuleType::JsDynamic | ModuleType::JsAuto
+        ),
+        import_attributes: true,
+        ..Default::default()
+      }),
+      target,
+      SourceFileInput::from(&*fm),
+      Some(&comments),
+    );
 
-    let output: crate::TransformOutput = crate::ast::stringify(
-      &ast,
-      additional_data
-        .remove::<CodegenOptions>()
-        .unwrap_or_else(|| CodegenOptions::new(&compiler_options.devtool, Some(true))),
-    )?;
-
-    ast = match crate::ast::parse(
-      output.code.clone(),
-      syntax,
-      &resource_data.resource_path.to_string_lossy(),
+    let mut ast = match crate::ast::parse(
+      lexer.clone(),
+      &fm,
+      cm.clone(),
+      Some(comments.clone()),
       module_type,
     ) {
       Ok(ast) => ast,
-      Err(e) => bail!(e),
+      Err(e) => {
+        diagnostics.append(&mut e.into_iter().map(|e| e.boxed()).collect());
+        return default_with_diagnostics(source, diagnostics);
+      }
     };
 
+    let mut semicolons = Default::default();
     ast.transform(|program, context| {
       program.visit_mut_with(&mut resolver(
         context.unresolved_mark,
         context.top_level_mark,
-        compiler_options.should_transform_by_default() && syntax.typescript(),
+        false,
       ));
+      program.visit_with(&mut semicolon::InsertedSemicolons {
+        semicolons: &mut semicolons,
+        tokens: &lexer.collect_vec(),
+      });
     });
 
+    let unresolved_mark = ast.get_context().unresolved_mark;
+
     let ScanDependenciesResult {
-      mut dependencies,
+      dependencies,
+      blocks,
       presentational_dependencies,
-      mut rewrite_usage_span,
-      import_map,
-    } = match ast.visit(|program, context| {
+      mut warning_diagnostics,
+      ..
+    } = match ast.visit(|program, _| {
       scan_dependencies(
+        cm.clone(),
+        &fm,
         program,
-        context.unresolved_mark,
         resource_data,
         compiler_options,
         module_type,
+        module_layer,
         build_info,
         build_meta,
         module_identifier,
+        module_parser_options,
+        &mut semicolons,
+        unresolved_mark,
+        &mut self.parser_plugins,
+        additional_data,
+        parse_meta,
       )
     }) {
       Ok(result) => result,
-      Err(e) => bail!(e),
+      Err(mut e) => {
+        diagnostics.append(&mut e);
+        return default_with_diagnostics(source, diagnostics);
+      }
     };
+    diagnostics.append(&mut warning_diagnostics);
+    let mut side_effects_bailout = None;
 
-    let analyze_result = if compiler_options.builtins.tree_shaking.enable() {
-      JsModule::new(&ast, &dependencies, module_identifier, compiler_options).analyze()
-    } else {
-      OptimizeAnalyzeResult::default()
-    };
-
-    if compiler_options.is_new_tree_shaking()
-      && compiler_options.optimization.side_effects.is_true()
-    {
+    if compiler_options.optimization.side_effects.is_true() {
       ast.transform(|program, context| {
         let unresolved_ctxt = SyntaxContext::empty().apply_mark(context.unresolved_mark);
-        let mut visitor =
-          SideEffectsFlagPluginVisitor::new(SyntaxContextInfo::new(unresolved_ctxt));
+        let mut visitor = SideEffectsFlagPluginVisitor::new(
+          SyntaxContextInfo::new(unresolved_ctxt),
+          program.comments.as_ref().map(|c| c as &dyn Comments),
+        );
         program.visit_with(&mut visitor);
-        build_meta.side_effect_free = Some(visitor.side_effects_span.is_none());
+        build_meta.side_effect_free = Some(visitor.side_effects_item.is_none());
+        // Take the item from visitor is safe, because the field is only used in this place
+        side_effects_bailout = visitor
+          .side_effects_item
+          .take()
+          .and_then(|item| -> Option<_> {
+            let source = source.source();
+            let msg = Into::<DependencyRange>::into(item.span)
+              .to_loc(Some(source.as_ref()))?
+              .to_string();
+            Some(SideEffectsBailoutItem { msg, ty: item.ty })
+          })
       });
-    }
-
-    let inner_graph =
-      if compiler_options.is_new_tree_shaking() && compiler_options.optimization.inner_graph {
-        ast.transform(|program, context| {
-          let unresolved_ctxt = SyntaxContext::empty().apply_mark(context.unresolved_mark);
-          let top_level_ctxt = SyntaxContext::empty().apply_mark(context.top_level_mark);
-          let mut plugin = InnerGraphPlugin::new(
-            &mut dependencies,
-            unresolved_ctxt,
-            top_level_ctxt,
-            &mut rewrite_usage_span,
-            &import_map,
-            module_identifier,
-          );
-          plugin.enable();
-          program.visit_with(&mut plugin);
-          Some(plugin)
-        })
-      } else {
-        None
-      };
-
-    let source = if let Some(map) = output.map {
-      SourceMapSource::new(SourceMapSourceOptions {
-        value: output.code,
-        name: resource_data.resource_path.to_string_lossy().to_string(),
-        source_map: SourceMap::from_json(&map).map_err(|e| internal_error!(e.to_string()))?,
-        inner_source_map: use_source_map.then_some(original_map).flatten(),
-        remove_original_source: true,
-        ..Default::default()
-      })
-      .boxed()
-    } else if use_simple_source_map {
-      OriginalSource::new(output.code, resource_data.resource_path.to_string_lossy()).boxed()
-    } else {
-      RawSource::from(output.code).boxed()
-    };
-
-    fn create_source(content: String, resource_path: String, devtool: bool) -> BoxSource {
-      if devtool {
-        return OriginalSource::new(content, resource_path).boxed();
-      }
-      RawSource::from(content).boxed()
-    }
-    if let Some(mut inner_graph) = inner_graph {
-      inner_graph.infer_dependency_usage();
     }
 
     Ok(
       ParseResult {
         source,
         dependencies,
+        blocks,
         presentational_dependencies,
-        analyze_result,
+        code_generation_dependencies: vec![],
+        side_effects_bailout,
       }
-      .with_empty_diagnostic(),
+      .with_diagnostic(map_box_diagnostics_to_module_parse_diagnostics(
+        diagnostics,
+        loaders,
+      )),
     )
   }
 
-  #[allow(clippy::unwrap_in_result)]
   fn generate(
     &self,
     source: &BoxSource,
@@ -249,22 +285,12 @@ impl ParserAndGenerator for JavaScriptParserAndGenerator {
         runtime_requirements: generate_context.runtime_requirements,
         init_fragments: &mut init_fragments,
         runtime: generate_context.runtime,
+        concatenation_scope: generate_context.concatenation_scope.take(),
+        data: generate_context.data,
       };
 
-      let mgm = compilation
-        .module_graph
-        .module_graph_module_by_identifier(&module.identifier())
-        .expect("should have module graph module");
-
-      mgm.dependencies.iter().for_each(|id| {
-        if let Some(dependency) = compilation
-          .module_graph
-          .dependency_by_id(id)
-          .expect("should have dependency")
-          .as_dependency_template()
-        {
-          dependency.apply(&mut source, &mut context)
-        }
+      module.get_dependencies().iter().for_each(|dependency_id| {
+        self.source_dependency(compilation, dependency_id, &mut source, &mut context)
       });
 
       if let Some(dependencies) = module.get_presentational_dependencies() {
@@ -273,12 +299,48 @@ impl ParserAndGenerator for JavaScriptParserAndGenerator {
           .for_each(|dependency| dependency.apply(&mut source, &mut context));
       };
 
+      module
+        .get_blocks()
+        .iter()
+        .for_each(|block_id| self.source_block(compilation, block_id, &mut source, &mut context));
+      generate_context.concatenation_scope = context.concatenation_scope.take();
       render_init_fragments(source.boxed(), init_fragments, generate_context)
     } else {
-      Err(internal_error!(
-        "Unsupported source type {:?} for plugin JavaScript",
-        generate_context.requested_source_type,
-      ))
+      panic!(
+        "Unsupported source type: {:?}",
+        generate_context.requested_source_type
+      )
     }
+  }
+
+  fn get_concatenation_bailout_reason(
+    &self,
+    module: &dyn rspack_core::Module,
+    _mg: &ModuleGraph,
+    _cg: &ChunkGraph,
+  ) -> Option<Cow<'static, str>> {
+    // Only ES modules are valid for optimization
+    if module.build_meta().exports_type != BuildMetaExportsType::Namespace {
+      return Some("Module is not an ECMAScript module".into());
+    }
+
+    if let Some(deps) = module.get_presentational_dependencies() {
+      if !deps.iter().any(|dep| {
+        // https://github.com/webpack/webpack/blob/b9fb99c63ca433b24233e0bbc9ce336b47872c08/lib/javascript/JavascriptGenerator.js#L65-L74
+        dep
+          .as_any()
+          .downcast_ref::<ESMCompatibilityDependency>()
+          .is_some()
+      }) {
+        return Some("Module is not an ECMAScript module".into());
+      }
+    } else {
+      return Some("Module is not an ECMAScript module".into());
+    }
+
+    if let Some(bailout) = module.build_info().module_concatenation_bailout.as_deref() {
+      return Some(format!("Module uses {bailout}").into());
+    }
+    None
   }
 }

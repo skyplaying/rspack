@@ -1,7 +1,12 @@
-use rspack_core::LoaderRunnerContext;
-use rspack_error::{internal_error, Result};
+mod plugin;
+
+pub use plugin::ReactRefreshLoaderPlugin;
+use rspack_cacheable::{cacheable, cacheable_dyn};
+use rspack_core::RunnerContext;
+use rspack_error::Result;
 use rspack_loader_runner::{Identifiable, Identifier, Loader, LoaderContext};
 
+#[cacheable]
 pub struct ReactRefreshLoader {
   identifier: Identifier,
 }
@@ -18,17 +23,18 @@ impl ReactRefreshLoader {
   /// Panics:
   /// Panics if `identifier` passed in is not starting with `builtin:react-refresh-loader`.
   pub fn with_identifier(mut self, identifier: Identifier) -> Self {
-    assert!(identifier.starts_with(REACT_REFRESH_LOADER_IDENTIFIER));
+    debug_assert!(identifier.starts_with(REACT_REFRESH_LOADER_IDENTIFIER));
     self.identifier = identifier;
     self
   }
 }
 
+#[cacheable_dyn]
 #[async_trait::async_trait]
-impl Loader<LoaderRunnerContext> for ReactRefreshLoader {
-  async fn run(&self, loader_context: &mut LoaderContext<'_, LoaderRunnerContext>) -> Result<()> {
-    let Some(content) = std::mem::take(&mut loader_context.content) else {
-      return Err(internal_error!("Content should be available"))
+impl Loader<RunnerContext> for ReactRefreshLoader {
+  async fn run(&self, loader_context: &mut LoaderContext<RunnerContext>) -> Result<()> {
+    let Some(content) = loader_context.take_content() else {
+      return Ok(());
     };
     let mut source = content.try_into_string()?;
     source += r#"
@@ -42,7 +48,8 @@ Promise.resolve().then(function() {
   $ReactRefreshRuntime$.refresh(__webpack_module__.id, __webpack_module__.hot);
 });
 "#;
-    loader_context.content = Some(source.into());
+    let sm = loader_context.take_source_map();
+    loader_context.finish_with((source, sm));
     Ok(())
   }
 }

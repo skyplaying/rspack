@@ -7,15 +7,16 @@
  * Copyright (c) JS Foundation and other contributors
  * https://github.com/webpack/webpack/blob/main/LICENSE
  */
-import type { Hook, AsArray } from "tapable";
-import { HookMap, SyncBailHook, SyncWaterfallHook } from "tapable";
+import type { AsArray, Hook } from "@rspack/lite-tapable";
+import { HookMap, SyncBailHook, SyncWaterfallHook } from "@rspack/lite-tapable";
+
 import type {
 	StatsAsset,
 	StatsChunk,
 	StatsChunkGroup,
+	StatsCompilation,
 	StatsModule,
-	StatsModuleReason,
-	StatsCompilation
+	StatsModuleReason
 } from "./statsFactoryUtils";
 
 type PrintedElement = {
@@ -176,10 +177,9 @@ export class StatsPrinter {
 		data: AsArray<T>[0],
 		fn: (hook: SyncWaterfallHook<T>, data: AsArray<T>[0]) => AsArray<T>[0]
 	): AsArray<T>[0] {
-		for (const hook of this._getAllLevelHooks(hookMap, type)) {
-			data = fn(hook, data);
-		}
-		return data;
+		return this._getAllLevelHooks(hookMap, type).reduce((data, hook) => {
+			return fn(hook, data);
+		}, data);
 	}
 
 	print(
@@ -193,14 +193,13 @@ export class StatsPrinter {
 	): string {
 		if (this._inPrint) {
 			return this._print(type, object, baseContext);
-		} else {
-			try {
-				this._inPrint = true;
-				return this._print(type, object, baseContext);
-			} finally {
-				this._levelHookCache.clear();
-				this._inPrint = false;
-			}
+		}
+		try {
+			this._inPrint = true;
+			return this._print(type, object, baseContext);
+		} finally {
+			this._levelHookCache.clear();
+			this._inPrint = false;
 		}
 	}
 

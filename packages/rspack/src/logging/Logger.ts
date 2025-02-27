@@ -39,13 +39,13 @@ export function getLogTypesBitFlag(types: LogTypeEnum[]) {
 	return types.reduce((acc, cur) => acc | getLogTypeBitFlag(cur), 0);
 }
 
-export type LogTypeEnum = typeof LogType[keyof typeof LogType];
+export type LogTypeEnum = (typeof LogType)[keyof typeof LogType];
 
 const LOG_SYMBOL = Symbol("webpack logger raw log method");
 const TIMERS_SYMBOL = Symbol("webpack logger times");
 const TIMERS_AGGREGATES_SYMBOL = Symbol("webpack logger aggregated times");
 
-export type LogFunction = (type: LogTypeEnum, args?: any[]) => void;
+export type LogFunction = (type: LogTypeEnum, args: any[]) => void;
 export type GetChildLogger = (name: string | (() => string)) => Logger;
 
 export class Logger {
@@ -122,7 +122,7 @@ export class Logger {
 	}
 
 	timeLog(label: any) {
-		const prev = this[TIMERS_SYMBOL] && this[TIMERS_SYMBOL].get(label);
+		const prev = this[TIMERS_SYMBOL]?.get(label);
 		if (!prev) {
 			throw new Error(`No such label '${label}' for WebpackLogger.timeLog()`);
 		}
@@ -131,7 +131,7 @@ export class Logger {
 	}
 
 	timeEnd(label: any) {
-		const prev = this[TIMERS_SYMBOL] && this[TIMERS_SYMBOL].get(label);
+		const prev = this[TIMERS_SYMBOL]?.get(label);
 		if (!prev) {
 			throw new Error(`No such label '${label}' for WebpackLogger.timeEnd()`);
 		}
@@ -141,7 +141,7 @@ export class Logger {
 	}
 
 	timeAggregate(label: any) {
-		const prev = this[TIMERS_SYMBOL] && this[TIMERS_SYMBOL].get(label);
+		const prev = this[TIMERS_SYMBOL]?.get(label);
 		if (!prev) {
 			throw new Error(
 				`No such label '${label}' for WebpackLogger.timeAggregate()`

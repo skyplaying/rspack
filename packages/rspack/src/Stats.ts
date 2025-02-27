@@ -8,29 +8,67 @@
  * https://github.com/webpack/webpack/blob/main/LICENSE
  */
 import type * as binding from "@rspack/binding";
-import { Compilation, FilterItemTypes } from ".";
-import { StatsValue, StatsOptions } from "./config";
+
+import type { Compilation } from "./Compilation";
+import type { StatsOptions, StatsValue } from "./config";
 import type { StatsCompilation } from "./stats/statsFactoryUtils";
+
+export type {
+	StatsAsset,
+	StatsChunk,
+	StatsCompilation,
+	StatsError,
+	StatsModule
+} from "./stats/statsFactoryUtils";
 
 export class Stats {
 	#inner: binding.JsStats;
-	compilation: Compilation;
+	#compilation: Compilation;
+	#innerMap: WeakMap<Compilation, binding.JsStats>;
 
 	constructor(compilation: Compilation) {
 		this.#inner = compilation.__internal_getInner().getStats();
-		this.compilation = compilation;
+		this.#compilation = compilation;
+		this.#innerMap = new WeakMap([[this.compilation, this.#inner]]);
+	}
+
+	// use correct JsStats for child compilation
+	#getInnerByCompilation(compilation: Compilation): binding.JsStats {
+		if (this.#innerMap.has(compilation)) {
+			return this.#innerMap.get(compilation)!;
+		}
+		const inner = compilation.__internal_getInner().getStats();
+		this.#innerMap.set(compilation, inner);
+		return inner;
+	}
+
+	get compilation() {
+		if (this.#compilation.__internal__shutdown) {
+			throw new Error(
+				"Unable to access `Stats` after the compiler was shutdown"
+			);
+		}
+		return this.#compilation;
 	}
 
 	get hash() {
 		return this.compilation.hash;
 	}
 
+	get startTime() {
+		return this.compilation.startTime;
+	}
+
+	get endTime() {
+		return this.compilation.endTime;
+	}
+
 	hasErrors() {
-		return this.#inner.getErrors().length > 0;
+		return this.#inner.hasErrors();
 	}
 
 	hasWarnings() {
-		return this.#inner.getWarnings().length > 0;
+		return this.#inner.hasWarnings();
 	}
 
 	toJson(opts?: StatsValue, forToString?: boolean): StatsCompilation {
@@ -40,6 +78,11 @@ export class Stats {
 
 		const statsFactory = this.compilation.createStatsFactory(options);
 
+		const statsCompilationMap = new Map<
+			Compilation,
+			binding.JsStatsCompilation
+		>();
+
 		// FIXME: This is a really ugly workaround for avoid panic for accessing previous compilation.
 		// Modern.js dev server will detect whether the returned stats is available.
 		// So this does not do harm to these frameworks.
@@ -48,12 +91,22 @@ export class Stats {
 		try {
 			stats = statsFactory.create("compilation", this.compilation, {
 				compilation: this.compilation,
-				_inner: this.#inner
+				getStatsCompilation: (
+					compilation: Compilation
+				): binding.JsStatsCompilation => {
+					if (statsCompilationMap.has(compilation)) {
+						return statsCompilationMap.get(compilation)!;
+					}
+					const innerStats = this.#getInnerByCompilation(compilation);
+					const innerStatsCompilation = innerStats.toJson(options);
+					statsCompilationMap.set(compilation, innerStatsCompilation);
+					return innerStatsCompilation;
+				},
+				getInner: this.#getInnerByCompilation.bind(this)
 			});
 		} catch (e) {
 			console.warn(
-				"Failed to get stats. " +
-					"Are you trying to access the stats from the previous compilation?"
+				`Failed to get stats due to error: ${(e as Error)?.message}, are you trying to access the stats from the previous compilation?`
 			);
 		}
 		return stats as StatsCompilation;
@@ -67,6 +120,11 @@ export class Stats {
 
 		const statsPrinter = this.compilation.createStatsPrinter(options);
 
+		const statsCompilationMap = new Map<
+			Compilation,
+			binding.JsStatsCompilation
+		>();
+
 		// FIXME: This is a really ugly workaround for avoid panic for accessing previous compilation.
 		// Modern.js dev server will detect whether the returned stats is available.
 		// So this does not do harm to these frameworks.
@@ -75,12 +133,22 @@ export class Stats {
 		try {
 			stats = statsFactory.create("compilation", this.compilation, {
 				compilation: this.compilation,
-				_inner: this.#inner
+				getStatsCompilation: (
+					compilation: Compilation
+				): binding.JsStatsCompilation => {
+					if (statsCompilationMap.has(compilation)) {
+						return statsCompilationMap.get(compilation)!;
+					}
+					const innerStats = this.#getInnerByCompilation(compilation);
+					const innerStatsCompilation = innerStats.toJson(options);
+					statsCompilationMap.set(compilation, innerStatsCompilation);
+					return innerStatsCompilation;
+				},
+				getInner: this.#getInnerByCompilation.bind(this)
 			});
 		} catch (e) {
 			console.warn(
-				"Failed to get stats. " +
-					"Are you trying to access the stats from the previous compilation?"
+				`Failed to get stats due to error: ${(e as Error)?.message}, are you trying to access the stats from the previous compilation?`
 			);
 		}
 
@@ -97,17 +165,16 @@ export class Stats {
 export function normalizeStatsPreset(options?: StatsValue): StatsOptions {
 	if (typeof options === "boolean" || typeof options === "string")
 		return presetToOptions(options);
-	else if (!options) return {};
-	else {
-		let obj = { ...presetToOptions(options.preset), ...options };
-		delete obj.preset;
-		return obj;
-	}
+	if (!options) return {};
+
+	const obj = { ...presetToOptions(options.preset), ...options };
+	delete obj.preset;
+	return obj;
 }
 
 function presetToOptions(name?: boolean | string): StatsOptions {
-	const pn = (typeof name === "string" && name.toLowerCase()) || name;
-	switch (pn) {
+	const preset = (typeof name === "string" && name.toLowerCase()) || name;
+	switch (preset) {
 		case "none":
 			return {
 				all: false
@@ -115,15 +182,15 @@ function presetToOptions(name?: boolean | string): StatsOptions {
 		case "verbose":
 			return {
 				all: true,
-				modulesSpace: Infinity
+				modulesSpace: Number.POSITIVE_INFINITY
 			};
 		case "errors-only":
 			return {
 				all: false,
 				errors: true,
 				errorsCount: true,
-				logging: "error"
-				// TODO: moduleTrace: true,
+				logging: "error",
+				moduleTrace: true
 			};
 		case "errors-warnings":
 			return {
@@ -138,34 +205,3 @@ function presetToOptions(name?: boolean | string): StatsOptions {
 			return {};
 	}
 }
-
-export const normalizeFilter = (item: FilterItemTypes) => {
-	if (typeof item === "string") {
-		const regExp = new RegExp(
-			`[\\\\/]${item.replace(
-				// eslint-disable-next-line no-useless-escape
-				/[-[\]{}()*+?.\\^$|]/g,
-				"\\$&"
-			)}([\\\\/]|$|!|\\?)`
-		);
-		return (ident: string) => regExp.test(ident);
-	}
-	if (item && typeof item === "object" && typeof item.test === "function") {
-		return (ident: string) => item.test(ident);
-	}
-	if (typeof item === "function") {
-		return item;
-	}
-	if (typeof item === "boolean") {
-		return () => item;
-	}
-	throw new Error(
-		`unreachable: typeof ${item} should be one of string | RegExp | ((value: string) => boolean)`
-	);
-};
-
-export const optionsOrFallback = (...args: any) => {
-	let optionValues = [];
-	optionValues.push(...args);
-	return optionValues.find(optionValue => optionValue !== undefined);
-};

@@ -8,40 +8,32 @@
  * https://github.com/webpack/webpack/blob/main/LICENSE
  */
 
-import { MultiCompiler } from "./MultiCompiler";
-import Watching from "./Watching";
-import asyncLib from "neo-async";
-import { Callback } from "tapable";
+import asyncLib from "./util/asyncLib";
 
-/** @typedef {import("./MultiCompiler")} MultiCompiler */
-/** @typedef {import("./Watching")} Watching */
-
-/**
- * @template T
- * @callback Callback
- * @param {(Error | null)=} err
- * @param {T=} result
- */
+import type { Callback } from "@rspack/lite-tapable";
+import type { MultiCompiler } from "./MultiCompiler";
+import type { Watching } from "./Watching";
 
 class MultiWatching {
 	watchings: Watching[];
 	compiler: MultiCompiler;
 
 	/**
-	 * @param {Watching[]} watchings child compilers' watchers
-	 * @param {MultiCompiler} compiler the compiler
+	 * @param watchings - child compilers' watchers
+	 * @param compiler - the compiler
 	 */
 	constructor(watchings: Watching[], compiler: MultiCompiler) {
 		this.watchings = watchings;
 		this.compiler = compiler;
 	}
-	// @ts-expect-error
-	invalidate(callback) {
+	invalidate(callback: Callback<Error, void>) {
 		if (callback) {
 			asyncLib.each(
 				this.watchings,
 				(watching, callback) => watching.invalidate(callback),
-				callback
+				// cannot be resolved without assertion
+				// Type 'Error | null | undefined' is not assignable to type 'Error | null'
+				callback as (err: Error | null | undefined) => void
 			);
 		} else {
 			for (const watching of this.watchings) {
@@ -50,13 +42,8 @@ class MultiWatching {
 		}
 	}
 
-	/**
-	 * @param {Callback<void>} callback signals when the watcher is closed
-	 * @returns {void}
-	 */
-	// @ts-expect-error
-	close(callback) {
-		asyncLib.forEach(
+	close(callback: Callback<Error, void>) {
+		asyncLib.each(
 			this.watchings,
 			(watching, finishedCallback) => {
 				watching.close(finishedCallback);
@@ -65,7 +52,9 @@ class MultiWatching {
 				this.compiler.hooks.watchClose.call();
 				if (typeof callback === "function") {
 					this.compiler.running = false;
-					callback(err);
+					// cannot be resolved without assertion
+					// Type 'Error | null | undefined' is not assignable to type 'Error | null'
+					callback(err as Error | null);
 				}
 			}
 		);

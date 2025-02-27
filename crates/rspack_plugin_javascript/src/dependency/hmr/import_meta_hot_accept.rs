@@ -1,30 +1,33 @@
+use rspack_cacheable::{cacheable, cacheable_dyn, with::AsPreset};
 use rspack_core::{
-  module_id, Dependency, DependencyCategory, DependencyId, DependencyTemplate, DependencyType,
-  ErrorSpan, ModuleDependency, TemplateContext, TemplateReplaceSource,
+  module_id, AsContextDependency, Compilation, Dependency, DependencyCategory, DependencyId,
+  DependencyRange, DependencyTemplate, DependencyType, FactorizeInfo, ModuleDependency,
+  RuntimeSpec, TemplateContext, TemplateReplaceSource,
 };
-use swc_core::ecma::atoms::JsWord;
+use swc_core::ecma::atoms::Atom;
 
+#[cacheable]
 #[derive(Debug, Clone)]
 pub struct ImportMetaHotAcceptDependency {
   id: DependencyId,
-  request: JsWord,
-  start: u32,
-  end: u32,
-  span: Option<ErrorSpan>,
+  #[cacheable(with=AsPreset)]
+  request: Atom,
+  range: DependencyRange,
+  factorize_info: FactorizeInfo,
 }
 
 impl ImportMetaHotAcceptDependency {
-  pub fn new(start: u32, end: u32, request: JsWord, span: Option<ErrorSpan>) -> Self {
+  pub fn new(request: Atom, range: DependencyRange) -> Self {
     Self {
-      start,
-      end,
       request,
-      span,
+      range,
       id: DependencyId::new(),
+      factorize_info: Default::default(),
     }
   }
 }
 
+#[cacheable_dyn]
 impl Dependency for ImportMetaHotAcceptDependency {
   fn id(&self) -> &DependencyId {
     &self.id
@@ -38,15 +41,16 @@ impl Dependency for ImportMetaHotAcceptDependency {
     &DependencyType::ImportMetaHotAccept
   }
 
-  fn span(&self) -> Option<ErrorSpan> {
-    self.span
+  fn range(&self) -> Option<&DependencyRange> {
+    Some(&self.range)
   }
 
-  fn dependency_debug_name(&self) -> &'static str {
-    "ImportMetaHotAcceptDependency"
+  fn could_affect_referencing_module(&self) -> rspack_core::AffectType {
+    rspack_core::AffectType::True
   }
 }
 
+#[cacheable_dyn]
 impl ModuleDependency for ImportMetaHotAcceptDependency {
   fn request(&self) -> &str {
     &self.request
@@ -59,8 +63,21 @@ impl ModuleDependency for ImportMetaHotAcceptDependency {
   fn set_request(&mut self, request: String) {
     self.request = request.into();
   }
+
+  fn weak(&self) -> bool {
+    true
+  }
+
+  fn factorize_info(&self) -> &FactorizeInfo {
+    &self.factorize_info
+  }
+
+  fn factorize_info_mut(&mut self) -> &mut FactorizeInfo {
+    &mut self.factorize_info
+  }
 }
 
+#[cacheable_dyn]
 impl DependencyTemplate for ImportMetaHotAcceptDependency {
   fn apply(
     &self,
@@ -68,16 +85,30 @@ impl DependencyTemplate for ImportMetaHotAcceptDependency {
     code_generatable_context: &mut TemplateContext,
   ) {
     source.replace(
-      self.start,
-      self.end,
+      self.range.start,
+      self.range.end,
       module_id(
         code_generatable_context.compilation,
         &self.id,
         &self.request,
-        false,
+        self.weak(),
       )
       .as_str(),
       None,
     );
   }
+
+  fn dependency_id(&self) -> Option<DependencyId> {
+    Some(self.id)
+  }
+
+  fn update_hash(
+    &self,
+    _hasher: &mut dyn std::hash::Hasher,
+    _compilation: &Compilation,
+    _runtime: Option<&RuntimeSpec>,
+  ) {
+  }
 }
+
+impl AsContextDependency for ImportMetaHotAcceptDependency {}

@@ -1,145 +1,156 @@
-import type {
-	RawCacheGroupOptions,
-	RawModuleRule,
-	RawOptions,
-	RawRuleSetCondition,
-	RawRuleSetLogicalConditions,
-	RawGeneratorOptions,
-	RawAssetGeneratorOptions,
-	RawParserOptions,
-	RawAssetParserOptions,
-	RawAssetParserDataUrl,
-	RawAssetGeneratorDataUrl,
-	RawAssetInlineGeneratorOptions,
-	RawAssetResourceGeneratorOptions,
-	RawIncrementalRebuild,
-	RawModuleRuleUses,
-	RawFuncUseCtx,
-	RawRspackFuture
+import assert from "node:assert";
+import {
+	type RawAssetGeneratorDataUrlFnCtx,
+	type RawAssetGeneratorOptions,
+	type RawAssetInlineGeneratorOptions,
+	type RawAssetParserDataUrl,
+	type RawAssetParserOptions,
+	type RawAssetResourceGeneratorOptions,
+	type RawCssAutoGeneratorOptions,
+	type RawCssAutoParserOptions,
+	type RawCssGeneratorOptions,
+	type RawCssModuleGeneratorOptions,
+	type RawCssModuleParserOptions,
+	type RawCssParserOptions,
+	type RawEnvironment,
+	type RawFuncUseCtx,
+	type RawGeneratorOptions,
+	type RawJavascriptParserOptions,
+	type RawJsonParserOptions,
+	type RawModuleRule,
+	type RawModuleRuleUse,
+	type RawOptions,
+	type RawOutputOptions,
+	type RawParserOptions,
+	type RawRuleSetCondition,
+	RawRuleSetConditionType,
+	type RawRuleSetLogicalConditions
 } from "@rspack/binding";
-import assert from "assert";
-import { Compiler } from "../Compiler";
+
+import type { Compiler } from "../Compiler";
+import { Module } from "../Module";
 import { normalizeStatsPreset } from "../Stats";
-import { deprecatedWarn, isNil } from "../util";
+import { isNil } from "../util";
 import { parseResource } from "../util/identifier";
 import {
-	ComposeJsUseOptions,
-	LoaderContext,
-	createRawModuleRuleUses,
-	LoaderDefinition,
-	LoaderDefinitionFunction
+	type ComposeJsUseOptions,
+	type LoaderContext,
+	type LoaderDefinition,
+	type LoaderDefinitionFunction,
+	createRawModuleRuleUses
 } from "./adapterRuleUse";
-import {
-	CrossOriginLoading,
-	LibraryOptions,
-	Node,
-	Optimization,
-	Resolve,
-	RuleSetCondition,
-	RuleSetLogicalConditions,
-	RuleSetRule,
-	SnapshotOptions,
-	StatsValue,
-	Target,
-	AssetGeneratorDataUrl,
-	AssetGeneratorOptions,
-	AssetInlineGeneratorOptions,
-	AssetResourceGeneratorOptions,
-	AssetParserDataUrl,
-	AssetParserOptions,
-	ParserOptionsByModuleType,
-	GeneratorOptionsByModuleType,
-	IncrementalRebuildOptions,
-	OptimizationSplitChunksOptions,
-	RspackFutureOptions
-} from "./zod";
-import {
+import type {
 	ExperimentsNormalized,
 	ModuleOptionsNormalized,
 	OutputNormalized,
 	RspackOptionsNormalized
 } from "./normalization";
+import type {
+	AssetGeneratorDataUrl,
+	AssetGeneratorOptions,
+	AssetInlineGeneratorOptions,
+	AssetParserDataUrl,
+	AssetParserOptions,
+	AssetResourceGeneratorOptions,
+	CssAutoGeneratorOptions,
+	CssGeneratorOptions,
+	CssParserOptions,
+	GeneratorOptionsByModuleType,
+	JavascriptParserOptions,
+	JsonParserOptions,
+	Node,
+	Optimization,
+	Output,
+	ParserOptionsByModuleType,
+	Resolve,
+	RuleSetCondition,
+	RuleSetLogicalConditions,
+	RuleSetRule,
+	StatsValue
+} from "./types";
 
 export type { LoaderContext, LoaderDefinition, LoaderDefinitionFunction };
 
+// invariant: `options` is normalized with default value applied
 export const getRawOptions = (
 	options: RspackOptionsNormalized,
-	compiler: Compiler,
-	processResource: (
-		loaderContext: LoaderContext,
-		resourcePath: string,
-		callback: any
-	) => void
+	compiler: Compiler
 ): RawOptions => {
-	assert(
-		!isNil(options.context) && !isNil(options.devtool) && !isNil(options.cache),
-		"context, devtool, cache should not be nil after defaults"
-	);
-	const devtool = options.devtool === false ? "" : options.devtool;
 	const mode = options.mode;
-	const experiments = getRawExperiments(options.experiments);
+	const experiments = options.experiments as Required<ExperimentsNormalized>;
 	return {
+		name: options.name,
 		mode,
-		target: getRawTarget(options.target),
-		context: options.context,
+		context: options.context!,
 		output: getRawOutput(options.output),
 		resolve: getRawResolve(options.resolve),
 		resolveLoader: getRawResolve(options.resolveLoader),
 		module: getRawModule(options.module, {
 			compiler,
-			devtool,
 			mode,
-			context: options.context,
+			context: options.context!,
 			experiments
 		}),
-		devtool,
-		optimization: getRawOptimization(options.optimization),
+		optimization: options.optimization as Required<Optimization>,
 		stats: getRawStats(options.stats),
-		devServer: {
-			hot: options.devServer?.hot ?? false
-		},
-		snapshot: getRawSnapshotOptions(options.snapshot),
 		cache: {
-			type: options.cache ? "memory" : "disable",
-			// TODO: implement below cache options
-			maxGenerations: 0,
-			maxAge: 0,
-			profile: false,
-			buildDependencies: [],
-			cacheDirectory: "",
-			cacheLocation: "",
-			name: "",
-			version: ""
+			type: options.cache ? "memory" : "disable"
 		},
 		experiments,
 		node: getRawNode(options.node),
 		profile: options.profile!,
-		// TODO: remove this
-		builtins: options.builtins as any
+		amd: options.amd ? JSON.stringify(options.amd || {}) : undefined,
+		bail: options.bail!,
+		__references: {}
 	};
 };
 
-function getRawTarget(target: Target | undefined): RawOptions["target"] {
-	if (!target) {
-		return [];
-	}
-	if (typeof target === "string") {
-		return [target];
-	}
-	return target;
+function getRawOutput(output: Output): RawOutputOptions {
+	return {
+		...(output as Required<OutputNormalized>),
+		environment: getRawOutputEnvironment(output.environment)
+	};
+}
+
+function getRawOutputEnvironment(
+	environment: Output["environment"] = {}
+): RawEnvironment {
+	return {
+		const: Boolean(environment.const),
+		arrowFunction: Boolean(environment.arrowFunction),
+		nodePrefixForCoreModules: Boolean(environment.nodePrefixForCoreModules),
+		asyncFunction: Boolean(environment.asyncFunction),
+		bigIntLiteral: Boolean(environment.bigIntLiteral),
+		destructuring: Boolean(environment.destructuring),
+		document: Boolean(environment.document),
+		dynamicImport: Boolean(environment.dynamicImport),
+		forOf: Boolean(environment.forOf),
+		globalThis: Boolean(environment.globalThis),
+		module: Boolean(environment.module),
+		optionalChaining: Boolean(environment.optionalChaining),
+		templateLiteral: Boolean(environment.templateLiteral)
+	};
+}
+
+function getRawExtensionAlias(
+	alias: Resolve["extensionAlias"] = {}
+): RawOptions["resolve"]["extensionAlias"] {
+	const entries = Object.entries(alias).map(([key, value]) => {
+		if (Array.isArray(value)) {
+			return [key, value];
+		}
+		return [key, [value]];
+	});
+	return Object.fromEntries(entries);
 }
 
 function getRawAlias(
 	alias: Resolve["alias"] = {}
 ): RawOptions["resolve"]["alias"] {
-	const entires = Object.entries(alias).map(([key, value]) => {
-		if (Array.isArray(value)) {
-			return [key, value];
-		} else {
-			return [key, [value]];
-		}
-	});
-	return Object.fromEntries(entires);
+	return Object.entries(alias).map(([key, value]) => ({
+		path: key,
+		redirect: Array.isArray(value) ? value : [value]
+	}));
 }
 
 function getRawResolveByDependency(
@@ -151,128 +162,34 @@ function getRawResolveByDependency(
 	);
 }
 
-function getRawResolve(resolve: Resolve): RawOptions["resolve"] {
-	let references = resolve.tsConfig?.references;
-	let tsconfigConfigFile = resolve.tsConfigPath ?? resolve.tsConfig?.configFile;
+function getRawTsConfig(
+	tsConfig: Resolve["tsConfig"]
+): RawOptions["resolve"]["tsconfig"] {
+	assert(
+		typeof tsConfig !== "string",
+		"should resolve string tsConfig in normalization"
+	);
+	if (tsConfig === undefined) return tsConfig;
+	const { configFile, references } = tsConfig;
+	return {
+		configFile,
+		referencesType:
+			references === "auto" ? "auto" : references ? "manual" : "disabled",
+		references: references === "auto" ? undefined : references
+	};
+}
+
+export function getRawResolve(resolve: Resolve): RawOptions["resolve"] {
 	return {
 		...resolve,
 		alias: getRawAlias(resolve.alias),
 		fallback: getRawAlias(resolve.fallback),
-		extensionAlias: getRawAlias(resolve.extensionAlias) as Record<
+		extensionAlias: getRawExtensionAlias(resolve.extensionAlias) as Record<
 			string,
 			Array<string>
 		>,
-		tsconfig: tsconfigConfigFile
-			? {
-					configFile: tsconfigConfigFile,
-					referencesType:
-						references == "auto" ? "auto" : references ? "manual" : "disabled",
-					references: references == "auto" ? undefined : references
-			  }
-			: undefined,
+		tsconfig: getRawTsConfig(resolve.tsConfig),
 		byDependency: getRawResolveByDependency(resolve.byDependency)
-	};
-}
-
-function getRawCrossOriginLoading(
-	crossOriginLoading: CrossOriginLoading
-): RawOptions["output"]["crossOriginLoading"] {
-	if (typeof crossOriginLoading === "boolean") {
-		return { type: "bool", boolPayload: crossOriginLoading };
-	}
-	return { type: "string", stringPayload: crossOriginLoading };
-}
-
-function getRawOutput(output: OutputNormalized): RawOptions["output"] {
-	const chunkLoading = output.chunkLoading!;
-	const wasmLoading = output.wasmLoading!;
-	const workerChunkLoading = output.workerChunkLoading!;
-	const workerWasmLoading = output.workerWasmLoading!;
-	return {
-		path: output.path!,
-		publicPath: output.publicPath!,
-		clean: output.clean!,
-		assetModuleFilename: output.assetModuleFilename!,
-		filename: output.filename!,
-		chunkFilename: output.chunkFilename!,
-		chunkLoading: chunkLoading === false ? "false" : chunkLoading,
-		crossOriginLoading: getRawCrossOriginLoading(output.crossOriginLoading!),
-		cssFilename: output.cssFilename!,
-		cssChunkFilename: output.cssChunkFilename!,
-		hotUpdateChunkFilename: output.hotUpdateChunkFilename!,
-		hotUpdateMainFilename: output.hotUpdateMainFilename!,
-		hotUpdateGlobal: output.hotUpdateGlobal!,
-		uniqueName: output.uniqueName!,
-		chunkLoadingGlobal: output.chunkLoadingGlobal!,
-		enabledLibraryTypes: output.enabledLibraryTypes,
-		library: output.library && getRawLibrary(output.library),
-		strictModuleErrorHandling: output.strictModuleErrorHandling!,
-		globalObject: output.globalObject!,
-		importFunctionName: output.importFunctionName!,
-		iife: output.iife!,
-		module: output.module!,
-		wasmLoading: wasmLoading === false ? "false" : wasmLoading,
-		enabledWasmLoadingTypes: output.enabledWasmLoadingTypes!,
-		enabledChunkLoadingTypes: output.enabledChunkLoadingTypes!,
-		webassemblyModuleFilename: output.webassemblyModuleFilename!,
-		trustedTypes: output.trustedTypes!,
-		sourceMapFilename: output.sourceMapFilename!,
-		hashFunction: output.hashFunction!,
-		hashDigest: output.hashDigest!,
-		hashDigestLength: output.hashDigestLength!,
-		hashSalt: output.hashSalt!,
-		asyncChunks: output.asyncChunks!,
-		workerChunkLoading:
-			workerChunkLoading === false ? "false" : workerChunkLoading,
-		workerWasmLoading:
-			workerWasmLoading === false ? "false" : workerWasmLoading,
-		workerPublicPath: output.workerPublicPath!
-	};
-}
-
-function getRawLibrary(
-	library: LibraryOptions
-): RawOptions["output"]["library"] {
-	const {
-		type,
-		name,
-		export: libraryExport,
-		umdNamedDefine,
-		auxiliaryComment
-	} = library;
-	return {
-		auxiliaryComment:
-			typeof auxiliaryComment === "string"
-				? {
-						commonjs: auxiliaryComment,
-						commonjs2: auxiliaryComment,
-						amd: auxiliaryComment,
-						root: auxiliaryComment
-				  }
-				: auxiliaryComment,
-		libraryType: type,
-		name:
-			name == null
-				? name
-				: typeof name === "object" && !Array.isArray(name)
-				? {
-						amd: name.amd,
-						commonjs: name.commonjs,
-						root:
-							Array.isArray(name.root) || name.root == null
-								? name.root
-								: [name.root]
-				  }
-				: {
-						amd: Array.isArray(name) ? name[0] : name,
-						commonjs: Array.isArray(name) ? name[0] : name,
-						root: Array.isArray(name) || name == null ? name : [name]
-				  },
-		export:
-			Array.isArray(libraryExport) || libraryExport == null
-				? libraryExport
-				: [libraryExport],
-		umdNamedDefine
 	};
 }
 
@@ -290,12 +207,13 @@ function getRawModule(
 		{ rules: module.rules as RuleSetRule[] }
 	];
 	const rules = ruleSet.map((rule, index) =>
-		getRawModuleRule(rule, `ruleSet[${index}]`, options)
+		getRawModuleRule(rule, `ruleSet[${index}]`, options, "javascript/auto")
 	);
 	return {
 		rules,
-		parser: getRawParserOptionsByModuleType(module.parser),
-		generator: getRawGeneratorOptionsByModuleType(module.generator)
+		parser: getRawParserOptionsMap(module.parser),
+		generator: getRawGeneratorOptionsMap(module.generator),
+		noParse: module.noParse
 	};
 }
 
@@ -326,26 +244,18 @@ function tryMatch(payload: string, condition: RuleSetCondition): boolean {
 		}
 
 		if (condition.not) {
-			return condition.not.every(c => !tryMatch(payload, c));
+			return !tryMatch(payload, condition.not);
 		}
 	}
 
 	return false;
 }
 
-const deprecatedRuleType = (type?: string) => {
-	type ??= "javascript/auto";
-	if (/ts|typescript|tsx|typescriptx|jsx|javascriptx/.test(type)) {
-		deprecatedWarn(
-			`'Rule.type: ${type}' has been deprecated, please migrate to builtin:swc-loader with type 'javascript/auto'`
-		);
-	}
-};
-
 const getRawModuleRule = (
 	rule: RuleSetRule,
 	path: string,
-	options: ComposeJsUseOptions
+	options: ComposeJsUseOptions,
+	upperType: string
 ): RawModuleRule => {
 	// Rule.loader is a shortcut to Rule.use: [ { loader } ].
 	// See: https://webpack.js.org/configuration/module/#ruleloader
@@ -357,26 +267,28 @@ const getRawModuleRule = (
 			}
 		];
 	}
-	let funcUse;
+	let funcUse: undefined | ((rawContext: RawFuncUseCtx) => RawModuleRuleUse[]);
 	if (typeof rule.use === "function") {
+		const use = rule.use;
 		funcUse = (rawContext: RawFuncUseCtx) => {
 			const context = {
 				...rawContext,
 				compiler: options.compiler
 			};
-			const uses = (
-				rule.use as Exclude<RawModuleRuleUses["funcUse"], undefined>
-			)(context);
+			const uses = use(context);
 
 			return createRawModuleRuleUses(uses ?? [], `${path}.use`, options);
 		};
 	}
 
-	let rawModuleRule: RawModuleRule = {
+	const rawModuleRule: RawModuleRule = {
 		test: rule.test ? getRawRuleSetCondition(rule.test) : undefined,
 		include: rule.include ? getRawRuleSetCondition(rule.include) : undefined,
 		exclude: rule.exclude ? getRawRuleSetCondition(rule.exclude) : undefined,
 		issuer: rule.issuer ? getRawRuleSetCondition(rule.issuer) : undefined,
+		issuerLayer: rule.issuerLayer
+			? getRawRuleSetCondition(rule.issuerLayer)
+			: undefined,
 		dependency: rule.dependency
 			? getRawRuleSetCondition(rule.dependency)
 			: undefined,
@@ -386,7 +298,15 @@ const getRawModuleRule = (
 						k,
 						getRawRuleSetCondition(v)
 					])
-			  )
+				)
+			: undefined,
+		with: rule.with
+			? Object.fromEntries(
+					Object.entries(rule.with).map(([k, v]) => [
+						k,
+						getRawRuleSetCondition(v)
+					])
+				)
 			: undefined,
 		resource: rule.resource ? getRawRuleSetCondition(rule.resource) : undefined,
 		resourceQuery: rule.resourceQuery
@@ -400,32 +320,40 @@ const getRawModuleRule = (
 		sideEffects: rule.sideEffects,
 		use:
 			typeof rule.use === "function"
-				? { type: "function", funcUse }
-				: {
-						type: "array",
-						arrayUse: createRawModuleRuleUses(
-							rule.use ?? [],
-							`${path}.use`,
-							options
-						)
-				  },
+				? funcUse
+				: createRawModuleRuleUses(rule.use ?? [], `${path}.use`, options),
 		type: rule.type,
+		layer: rule.layer,
 		parser: rule.parser
-			? getRawParserOptions(rule.parser, rule.type ?? "javascript/auto")
+			? getRawParserOptions(rule.parser, rule.type ?? upperType)
 			: undefined,
 		generator: rule.generator
-			? getRawGeneratorOptions(rule.generator, rule.type ?? "javascript/auto")
+			? getRawGeneratorOptions(rule.generator, rule.type ?? upperType)
 			: undefined,
 		resolve: rule.resolve ? getRawResolve(rule.resolve) : undefined,
 		oneOf: rule.oneOf
-			? rule.oneOf.map((rule, index) =>
-					getRawModuleRule(rule, `${path}.oneOf[${index}]`, options)
-			  )
+			? rule.oneOf
+					.filter(Boolean)
+					.map((rule, index) =>
+						getRawModuleRule(
+							rule as RuleSetRule,
+							`${path}.oneOf[${index}]`,
+							options,
+							(rule as RuleSetRule).type ?? upperType
+						)
+					)
 			: undefined,
 		rules: rule.rules
-			? rule.rules.map((rule, index) =>
-					getRawModuleRule(rule, `${path}.rules[${index}]`, options)
-			  )
+			? rule.rules
+					.filter(Boolean)
+					.map((rule, index) =>
+						getRawModuleRule(
+							rule as RuleSetRule,
+							`${path}.rules[${index}]`,
+							options,
+							(rule as RuleSetRule).type ?? upperType
+						)
+					)
 			: undefined,
 		enforce: rule.enforce
 	};
@@ -444,30 +372,31 @@ const getRawModuleRule = (
 		delete rawModuleRule.resourceQuery;
 		delete rawModuleRule.resourceFragment;
 
-		rawModuleRule.rspackResource = getRawRuleSetCondition(function (
-			resourceQueryFragment
-		) {
-			const { path, query, fragment } = parseResource(resourceQueryFragment);
+		rawModuleRule.rspackResource = getRawRuleSetCondition(
+			resourceQueryFragment => {
+				const { path, query, fragment } = parseResource(resourceQueryFragment);
 
-			if (rule.test && !tryMatch(path, rule.test)) {
-				return false;
-			} else if (rule.resource && !tryMatch(path, rule.resource)) {
-				return false;
+				if (rule.test && !tryMatch(path, rule.test)) {
+					return false;
+				}
+				if (rule.resource && !tryMatch(path, rule.resource)) {
+					return false;
+				}
+
+				if (rule.resourceQuery && !tryMatch(query, rule.resourceQuery)) {
+					return false;
+				}
+
+				if (
+					rule.resourceFragment &&
+					!tryMatch(fragment, rule.resourceFragment)
+				) {
+					return false;
+				}
+
+				return true;
 			}
-
-			if (rule.resourceQuery && !tryMatch(query, rule.resourceQuery)) {
-				return false;
-			}
-
-			if (rule.resourceFragment && !tryMatch(fragment, rule.resourceFragment)) {
-				return false;
-			}
-
-			return true;
-		});
-	}
-	if (options.experiments.rspackFuture.disableTransformByDefault) {
-		deprecatedRuleType(rule.type);
+		);
 	}
 	return rawModuleRule;
 };
@@ -477,32 +406,32 @@ function getRawRuleSetCondition(
 ): RawRuleSetCondition {
 	if (typeof condition === "string") {
 		return {
-			type: "string",
-			stringMatcher: condition
+			type: RawRuleSetConditionType.string,
+			string: condition
 		};
 	}
 	if (condition instanceof RegExp) {
 		return {
-			type: "regexp",
-			regexpMatcher: condition.source
+			type: RawRuleSetConditionType.regexp,
+			regexp: condition
 		};
 	}
 	if (typeof condition === "function") {
 		return {
-			type: "function",
-			funcMatcher: condition
+			type: RawRuleSetConditionType.func,
+			func: condition
 		};
 	}
 	if (Array.isArray(condition)) {
 		return {
-			type: "array",
-			arrayMatcher: condition.map(i => getRawRuleSetCondition(i))
+			type: RawRuleSetConditionType.array,
+			array: condition.map(i => getRawRuleSetCondition(i))
 		};
 	}
 	if (typeof condition === "object" && condition !== null) {
 		return {
-			type: "logical",
-			logicalMatcher: [getRawRuleSetLogicalConditions(condition)]
+			type: RawRuleSetConditionType.logical,
+			logical: [getRawRuleSetLogicalConditions(condition)]
 		};
 	}
 	throw new Error(
@@ -522,34 +451,125 @@ function getRawRuleSetLogicalConditions(
 	};
 }
 
-function getRawParserOptionsByModuleType(
+function getRawParserOptionsMap(
 	parser: ParserOptionsByModuleType
 ): Record<string, RawParserOptions> {
 	return Object.fromEntries(
-		Object.entries(parser).map(([k, v]) => [k, getRawParserOptions(v, k)])
+		Object.entries(parser)
+			.map(([k, v]) => [k, getRawParserOptions(v, k)])
+			.filter(([k, v]) => v !== undefined)
 	);
 }
 
-function getRawGeneratorOptionsByModuleType(
-	parser: GeneratorOptionsByModuleType
+function getRawGeneratorOptionsMap(
+	generator: GeneratorOptionsByModuleType
 ): Record<string, RawGeneratorOptions> {
 	return Object.fromEntries(
-		Object.entries(parser).map(([k, v]) => [k, getRawGeneratorOptions(v, k)])
+		Object.entries(generator)
+			.map(([k, v]) => [k, getRawGeneratorOptions(v, k)])
+			.filter(([k, v]) => v !== undefined)
 	);
 }
 
 function getRawParserOptions(
 	parser: { [k: string]: any },
 	type: string
-): RawParserOptions {
+): RawParserOptions | undefined {
 	if (type === "asset") {
 		return {
 			type: "asset",
 			asset: getRawAssetParserOptions(parser)
 		};
 	}
+	if (type === "javascript") {
+		return {
+			type: "javascript",
+			javascript: getRawJavascriptParserOptions(parser)
+		};
+	}
+	if (type === "javascript/auto") {
+		return {
+			type: "javascript/auto",
+			javascript: getRawJavascriptParserOptions(parser)
+		};
+	}
+	if (type === "javascript/dynamic") {
+		return {
+			type: "javascript/dynamic",
+			javascript: getRawJavascriptParserOptions(parser)
+		};
+	}
+	if (type === "javascript/esm") {
+		return {
+			type: "javascript/esm",
+			javascript: getRawJavascriptParserOptions(parser)
+		};
+	}
+	if (type === "css") {
+		return {
+			type: "css",
+			css: getRawCssParserOptions(parser)
+		};
+	}
+	if (type === "css/auto") {
+		return {
+			type: "css/auto",
+			cssAuto: getRawCssParserOptions(parser)
+		};
+	}
+	if (type === "css/module") {
+		return {
+			type: "css/module",
+			cssModule: getRawCssParserOptions(parser)
+		};
+	}
+
+	if (type === "json") {
+		return {
+			type: "json",
+			json: getRawJsonParserOptions(parser)
+		};
+	}
+
+	// FIXME: shouldn't depend on module type, for example: `rules: [{ test: /\.css/, generator: {..} }]` will error
+	throw new Error(`unreachable: unknow module type: ${type}`);
+}
+
+function getRawJavascriptParserOptions(
+	parser: JavascriptParserOptions
+): RawJavascriptParserOptions {
 	return {
-		type: "unknown"
+		dynamicImportMode: parser.dynamicImportMode,
+		dynamicImportPreload: parser.dynamicImportPreload?.toString(),
+		dynamicImportPrefetch: parser.dynamicImportPrefetch?.toString(),
+		dynamicImportFetchPriority: parser.dynamicImportFetchPriority,
+		importMeta: parser.importMeta,
+		url: parser.url?.toString(),
+		exprContextCritical: parser.exprContextCritical,
+		wrappedContextCritical: parser.wrappedContextCritical,
+		wrappedContextRegExp: parser.wrappedContextRegExp,
+		exportsPresence:
+			parser.exportsPresence === false ? "false" : parser.exportsPresence,
+		importExportsPresence:
+			parser.importExportsPresence === false
+				? "false"
+				: parser.importExportsPresence,
+		reexportExportsPresence:
+			parser.reexportExportsPresence === false
+				? "false"
+				: parser.reexportExportsPresence,
+		strictExportPresence: parser.strictExportPresence,
+		worker:
+			typeof parser.worker === "boolean"
+				? parser.worker
+					? ["..."]
+					: []
+				: parser.worker,
+		overrideStrict: parser.overrideStrict,
+		requireAsExpression: parser.requireAsExpression,
+		requireDynamic: parser.requireDynamic,
+		requireResolve: parser.requireResolve,
+		importDynamic: parser.importDynamic
 	};
 }
 
@@ -579,10 +599,30 @@ function getRawAssetParserDataUrl(
 	);
 }
 
+function getRawCssParserOptions(
+	parser: CssParserOptions
+): RawCssParserOptions | RawCssAutoParserOptions | RawCssModuleParserOptions {
+	return {
+		namedExports: parser.namedExports
+	};
+}
+
+function getRawJsonParserOptions(
+	parser: JsonParserOptions
+): RawJsonParserOptions {
+	return {
+		exportsDepth: parser.exportsDepth,
+		parse:
+			typeof parser.parse === "function"
+				? str => JSON.stringify(parser.parse!(str))
+				: undefined
+	};
+}
+
 function getRawGeneratorOptions(
 	generator: { [k: string]: any },
 	type: string
-): RawGeneratorOptions {
+): RawGeneratorOptions | undefined {
 	if (type === "asset") {
 		return {
 			type: "asset",
@@ -605,9 +645,38 @@ function getRawGeneratorOptions(
 				: undefined
 		};
 	}
-	return {
-		type: "unknown"
-	};
+	if (type === "css") {
+		return {
+			type: "css",
+			css: getRawCssGeneratorOptions(generator)
+		};
+	}
+	if (type === "css/auto") {
+		return {
+			type: "css/auto",
+			cssAuto: getRawCssAutoOrModuleGeneratorOptions(generator)
+		};
+	}
+	if (type === "css/module") {
+		return {
+			type: "css/module",
+			cssModule: getRawCssAutoOrModuleGeneratorOptions(generator)
+		};
+	}
+
+	if (
+		[
+			"asset/source",
+			"javascript",
+			"javascript/auto",
+			"javascript/dynamic",
+			"javascript/esm"
+		].includes(type)
+	) {
+		return undefined;
+	}
+
+	throw new Error(`unreachable: unknow module type: ${type}`);
 }
 
 function getRawAssetGeneratorOptions(
@@ -624,7 +693,7 @@ function getRawAssetInlineGeneratorOptions(
 ): RawAssetInlineGeneratorOptions {
 	return {
 		dataUrl: options.dataUrl
-			? getRawAssetGeneratorDaraUrl(options.dataUrl)
+			? getRawAssetGeneratorDataUrl(options.dataUrl)
 			: undefined
 	};
 }
@@ -633,170 +702,52 @@ function getRawAssetResourceGeneratorOptions(
 	options: AssetResourceGeneratorOptions
 ): RawAssetResourceGeneratorOptions {
 	return {
+		emit: options.emit,
 		filename: options.filename,
-		publicPath: options.publicPath
+		outputPath: options.outputPath,
+		publicPath: options.publicPath,
+		importMode: options.importMode
 	};
 }
 
-function getRawAssetGeneratorDaraUrl(
-	dataUrl: AssetGeneratorDataUrl
-): RawAssetGeneratorDataUrl {
+function getRawAssetGeneratorDataUrl(dataUrl: AssetGeneratorDataUrl) {
 	if (typeof dataUrl === "object" && dataUrl !== null) {
+		const encoding = dataUrl.encoding === false ? "false" : dataUrl.encoding;
 		return {
-			type: "options",
-			options: {
-				encoding: dataUrl.encoding === false ? "false" : dataUrl.encoding,
-				mimetype: dataUrl.mimetype
-			}
+			encoding,
+			mimetype: dataUrl.mimetype
+		} as const;
+	}
+	if (typeof dataUrl === "function" && dataUrl !== null) {
+		return (source: Buffer, context: RawAssetGeneratorDataUrlFnCtx) => {
+			return dataUrl(source, {
+				...context,
+				module: Module.__from_binding(context.module)
+			});
 		};
 	}
 	throw new Error(
-		`unreachable: AssetGeneratorDataUrl type should be one of "options", but got ${dataUrl}`
+		`unreachable: AssetGeneratorDataUrl type should be one of "options", "function", but got ${dataUrl}`
 	);
 }
 
-function getRawOptimization(
-	optimization: Optimization
-): RawOptions["optimization"] {
-	assert(
-		!isNil(optimization.moduleIds) &&
-			!isNil(optimization.chunkIds) &&
-			!isNil(optimization.removeAvailableModules) &&
-			!isNil(optimization.removeEmptyChunks) &&
-			!isNil(optimization.sideEffects) &&
-			!isNil(optimization.realContentHash) &&
-			!isNil(optimization.providedExports) &&
-			!isNil(optimization.usedExports) &&
-			!isNil(optimization.innerGraph),
-		"optimization.moduleIds, optimization.removeAvailableModules, optimization.removeEmptyChunks, optimization.sideEffects, optimization.realContentHash, optimization.providedExports, optimization.usedExports, optimization.innerGraph should not be nil after defaults"
-	);
+function getRawCssGeneratorOptions(
+	options: CssGeneratorOptions
+): RawCssGeneratorOptions {
 	return {
-		chunkIds: optimization.chunkIds,
-		splitChunks: toRawSplitChunksOptions(optimization.splitChunks),
-		moduleIds: optimization.moduleIds,
-		removeAvailableModules: optimization.removeAvailableModules,
-		removeEmptyChunks: optimization.removeEmptyChunks,
-		sideEffects: String(optimization.sideEffects),
-		realContentHash: optimization.realContentHash,
-		usedExports: String(optimization.usedExports),
-		providedExports: optimization.providedExports,
-		innerGraph: optimization.innerGraph
+		exportsOnly: options.exportsOnly,
+		esModule: options.esModule
 	};
 }
 
-function toRawSplitChunksOptions(
-	sc?: OptimizationSplitChunksOptions
-): RawOptions["optimization"]["splitChunks"] | undefined {
-	if (!sc) {
-		return;
-	}
-
-	const { name, cacheGroups = {}, ...passThrough } = sc;
+function getRawCssAutoOrModuleGeneratorOptions(
+	options: CssAutoGeneratorOptions
+): RawCssAutoGeneratorOptions | RawCssModuleGeneratorOptions {
 	return {
-		name: name === false ? undefined : name,
-		cacheGroups: Object.entries(cacheGroups)
-			.filter(([_key, group]) => group !== false)
-			.map(([key, group]) => {
-				group = group as Exclude<typeof group, false>;
-
-				const { test, name, ...passThrough } = group;
-				const rawGroup: RawCacheGroupOptions = {
-					key,
-					test,
-					name: name === false ? undefined : name,
-					...passThrough
-				};
-				return rawGroup;
-			}),
-		...passThrough
-	};
-}
-
-function getRawSnapshotOptions(
-	snapshot: SnapshotOptions
-): RawOptions["snapshot"] {
-	const { resolve, module } = snapshot;
-	assert(!isNil(resolve) && !isNil(module));
-	const { timestamp: resolveTimestamp, hash: resolveHash } = resolve;
-	const { timestamp: moduleTimestamp, hash: moduleHash } = module;
-	assert(
-		!isNil(resolveTimestamp) &&
-			!isNil(resolveHash) &&
-			!isNil(moduleTimestamp) &&
-			!isNil(moduleHash)
-	);
-	return {
-		resolve: {
-			timestamp: resolveTimestamp,
-			hash: resolveHash
-		},
-		module: {
-			timestamp: moduleTimestamp,
-			hash: moduleHash
-		}
-	};
-}
-
-function getRawExperiments(
-	experiments: ExperimentsNormalized
-): RawOptions["experiments"] {
-	const {
-		lazyCompilation,
-		incrementalRebuild,
-		asyncWebAssembly,
-		newSplitChunks,
-		topLevelAwait,
-		css,
-		rspackFuture
-	} = experiments;
-	assert(
-		!isNil(lazyCompilation) &&
-			!isNil(incrementalRebuild) &&
-			!isNil(asyncWebAssembly) &&
-			!isNil(newSplitChunks) &&
-			!isNil(topLevelAwait) &&
-			!isNil(css) &&
-			!isNil(rspackFuture)
-	);
-
-	return {
-		lazyCompilation,
-		incrementalRebuild: getRawIncrementalRebuild(incrementalRebuild),
-		asyncWebAssembly,
-		newSplitChunks,
-		topLevelAwait,
-		css,
-		rspackFuture: getRawRspackFutureOptions(rspackFuture)
-	};
-}
-
-function getRawRspackFutureOptions(
-	future: RspackFutureOptions
-): RawRspackFuture {
-	assert(!isNil(future.newResolver));
-	assert(!isNil(future.newTreeshaking));
-	assert(!isNil(future.disableTransformByDefault));
-	return {
-		newResolver: future.newResolver,
-		newTreeshaking: future.newTreeshaking,
-		disableTransformByDefault: future.disableTransformByDefault
-	};
-}
-
-function getRawIncrementalRebuild(
-	inc: false | IncrementalRebuildOptions
-): RawIncrementalRebuild {
-	if (inc === false) {
-		return {
-			make: false,
-			emitAsset: false
-		};
-	}
-	const { make, emitAsset } = inc;
-	assert(!isNil(make) && !isNil(emitAsset));
-	return {
-		make,
-		emitAsset
+		localIdentName: options.localIdentName,
+		exportsConvention: options.exportsConvention,
+		exportsOnly: options.exportsOnly,
+		esModule: options.esModule
 	};
 }
 

@@ -1,15 +1,20 @@
-use std::{borrow::Cow, path::Path};
+use std::sync::LazyLock;
+use std::{
+  borrow::Cow,
+  path::{Path, PathBuf},
+};
 
 use concat_string::concat_string;
-use once_cell::sync::Lazy;
+use cow_utils::CowUtils;
 use regex::Regex;
-use sugar_path::{AsPath, SugarPath};
+use sugar_path::SugarPath;
 
-static SEGMENTS_SPLIT_REGEXP: Lazy<Regex> = Lazy::new(|| Regex::new(r"([|!])").expect("TODO:"));
-static WINDOWS_ABS_PATH_REGEXP: Lazy<Regex> =
-  Lazy::new(|| Regex::new(r"^[a-zA-Z]:[/\\]").expect("TODO:"));
-static WINDOWS_PATH_SEPARATOR_REGEXP: Lazy<Regex> =
-  Lazy::new(|| Regex::new(r"[/\\]").expect("TODO:"));
+static SEGMENTS_SPLIT_REGEXP: LazyLock<Regex> =
+  LazyLock::new(|| Regex::new(r"([|!])").expect("TODO:"));
+static WINDOWS_ABS_PATH_REGEXP: LazyLock<Regex> =
+  LazyLock::new(|| Regex::new(r"^[a-zA-Z]:[/\\]").expect("TODO:"));
+static WINDOWS_PATH_SEPARATOR: &[char] = &['/', '\\'];
+
 pub fn make_paths_relative(context: &str, identifier: &str) -> String {
   SEGMENTS_SPLIT_REGEXP
     .split(identifier)
@@ -60,8 +65,7 @@ pub fn absolute_to_request<'b>(context: &str, maybe_absolute_path: &'b str) -> C
     // ("d:/aaaa/cccc").relative("c:/aaaaa/") would get "d:/aaaa/cccc".
     if !WINDOWS_ABS_PATH_REGEXP.is_match(&resource) {
       resource =
-        relative_path_to_request(&WINDOWS_PATH_SEPARATOR_REGEXP.replace_all(&resource, "/"))
-          .into_owned();
+        relative_path_to_request(&resource.cow_replace(WINDOWS_PATH_SEPARATOR, "/")).into_owned();
     }
     resource
   } else {
@@ -69,11 +73,11 @@ pub fn absolute_to_request<'b>(context: &str, maybe_absolute_path: &'b str) -> C
     return Cow::Borrowed(maybe_absolute_path);
   };
 
-  return if let Some(query_part) = query_part {
+  if let Some(query_part) = query_part {
     Cow::Owned(concat_string!(relative_resource, query_part))
   } else {
     Cow::Owned(relative_resource)
-  };
+  }
 }
 
 /// # Context
@@ -90,4 +94,34 @@ pub fn relative_path_to_request(rel: &str) -> Cow<str> {
   } else {
     Cow::Owned(concat_string!("./", rel))
   }
+}
+
+fn request_to_absolute(context: &str, relative_path: &str) -> String {
+  if relative_path.starts_with("./") || relative_path.starts_with("../") {
+    Path::new(context)
+      .join(relative_path)
+      .to_string_lossy()
+      .to_string()
+  } else {
+    PathBuf::from(relative_path).to_string_lossy().to_string()
+  }
+}
+
+pub fn make_paths_absolute(context: &str, identifier: &str) -> String {
+  SEGMENTS_SPLIT_REGEXP
+    .split(identifier)
+    .map(|str| request_to_absolute(context, str))
+    .collect::<Vec<String>>()
+    .join("")
+}
+
+static ZERO_WIDTH_SPACE: LazyLock<Regex> =
+  LazyLock::new(|| Regex::new("\u{200b}(.)").expect("invalid regex"));
+
+pub fn strip_zero_width_space_for_fragment(s: &str) -> Cow<str> {
+  ZERO_WIDTH_SPACE.replace_all(s, "$1")
+}
+
+pub fn insert_zero_width_space_for_fragment(s: &str) -> Cow<str> {
+  s.cow_replace("#", "\u{200b}#")
 }

@@ -7,61 +7,84 @@
  * Copyright (c) JS Foundation and other contributors
  * https://github.com/webpack/webpack/blob/main/LICENSE
  */
-import * as tapable from "tapable";
-import { Source } from "webpack-sources";
-
-import type {
-	ExternalObject,
-	JsAssetInfo,
-	JsChunk,
-	JsCompatSource,
-	JsCompilation,
-	JsModule,
-	JsStatsChunk,
-	JsStatsError,
-	PathData
-} from "@rspack/binding";
-
+import type * as binding from "@rspack/binding";
 import {
-	RspackOptionsNormalized,
-	StatsOptions,
-	OutputNormalized,
-	StatsValue,
-	RspackPluginInstance
-} from "./config";
-import { ContextModuleFactory } from "./ContextModuleFactory";
-import ResolverFactory from "./ResolverFactory";
+	type AssetInfo,
+	type ExternalObject,
+	type JsCompatSourceOwned,
+	type JsCompilation,
+	type JsPathData,
+	JsRspackSeverity,
+	type JsRuntimeModule
+} from "@rspack/binding";
+export type { AssetInfo } from "@rspack/binding";
+import * as liteTapable from "@rspack/lite-tapable";
+import type { Source } from "webpack-sources";
+import { Chunk } from "./Chunk";
+import { ChunkGraph } from "./ChunkGraph";
 import { ChunkGroup } from "./ChunkGroup";
-import { Compiler } from "./Compiler";
-import ErrorHelpers from "./ErrorHelpers";
-import { LogType, Logger } from "./logging/Logger";
-import { NormalModule } from "./NormalModule";
-import { NormalModuleFactory } from "./NormalModuleFactory";
+import type { Compiler } from "./Compiler";
+import type { ContextModuleFactory } from "./ContextModuleFactory";
+import { Dependency } from "./Dependency";
+import { Entrypoint } from "./Entrypoint";
+import { cutOffLoaderExecution } from "./ErrorHelpers";
+import { type CodeGenerationResult, Module } from "./Module";
+import ModuleGraph from "./ModuleGraph";
+import type { NormalModuleFactory } from "./NormalModuleFactory";
+import type { ResolverFactory } from "./ResolverFactory";
+import { JsRspackDiagnostic, type RspackError } from "./RspackError";
+import { RuntimeModule } from "./RuntimeModule";
 import {
 	Stats,
-	normalizeFilter,
-	normalizeStatsPreset,
-	optionsOrFallback
+	type StatsAsset,
+	type StatsError,
+	type StatsModule
 } from "./Stats";
+import type { EntryOptions, EntryPlugin } from "./builtin-plugin";
+import type {
+	Filename,
+	OutputNormalized,
+	RspackOptionsNormalized,
+	RspackPluginInstance,
+	StatsOptions,
+	StatsValue
+} from "./config";
+import WebpackError from "./lib/WebpackError";
+import { LogType, Logger } from "./logging/Logger";
 import { StatsFactory } from "./stats/StatsFactory";
 import { StatsPrinter } from "./stats/StatsPrinter";
-import { concatErrorMsgAndStack, isJsStatsError, toJsAssetInfo } from "./util";
-import { createRawFromSource, createSourceFromRaw } from "./util/createSource";
-import {
-	createFakeCompilationDependencies,
-	createFakeProcessAssetsHook,
-	createProcessAssetsHook
-} from "./util/fake";
-import { NormalizedJsModule, normalizeJsModule } from "./util/normalization";
-import MergeCaller from "./util/MergeCaller";
+import { AsyncTask } from "./util/AsyncTask";
+import { createReadonlyMap } from "./util/createReadonlyMap";
+import { createFakeCompilationDependencies } from "./util/fake";
+import type { InputFileSystem } from "./util/fs";
+import type Hash from "./util/hash";
+import { JsSource } from "./util/source";
 
-export type AssetInfo = Partial<JsAssetInfo> & Record<string, any>;
 export type Assets = Record<string, Source>;
 export interface Asset {
 	name: string;
-	source?: Source;
-	info: JsAssetInfo;
+	source: Source;
+	info: AssetInfo;
 }
+
+export type PathDataChunkLike = {
+	id?: string;
+	name?: string;
+	hash?: string;
+	contentHash?: Record<string, string>;
+};
+
+export type PathData = {
+	filename?: string;
+	hash?: string;
+	contentHash?: string;
+	runtime?: string;
+	url?: string;
+	id?: string;
+	chunk?: Chunk | PathDataChunkLike;
+	contentHashType?: string;
+};
+
 export interface LogEntry {
 	type: string;
 	args: any[];
@@ -71,90 +94,278 @@ export interface LogEntry {
 
 export interface CompilationParams {
 	normalModuleFactory: NormalModuleFactory;
+	contextModuleFactory: ContextModuleFactory;
 }
 
 export interface KnownCreateStatsOptionsContext {
 	forToString?: boolean;
 }
 
-type CreateStatsOptionsContext = KnownCreateStatsOptionsContext &
+export interface ExecuteModuleArgument {
+	codeGenerationResult: CodeGenerationResult;
+	moduleObject: {
+		id: string;
+		exports: any;
+		loaded: boolean;
+		error?: Error;
+	};
+}
+
+export interface ExecuteModuleContext {
+	__webpack_require__: (id: string) => any;
+}
+
+export interface KnownNormalizedStatsOptions {
+	context: string;
+	// requestShortener: RequestShortener;
+	chunksSort: string;
+	modulesSort: string;
+	chunkModulesSort: string;
+	nestedModulesSort: string;
+	assetsSort: string;
+	ids: boolean;
+	cachedAssets: boolean;
+	groupAssetsByEmitStatus: boolean;
+	groupAssetsByPath: boolean;
+	groupAssetsByExtension: boolean;
+	assetsSpace: number;
+	excludeAssets: ((value: string, asset: StatsAsset) => boolean)[];
+	excludeModules: ((
+		name: string,
+		module: StatsModule,
+		type: "module" | "chunk" | "root-of-chunk" | "nested"
+	) => boolean)[];
+	warningsFilter: ((warning: StatsError, textValue: string) => boolean)[];
+	cachedModules: boolean;
+	orphanModules: boolean;
+	dependentModules: boolean;
+	runtimeModules: boolean;
+	groupModulesByCacheStatus: boolean;
+	groupModulesByLayer: boolean;
+	groupModulesByAttributes: boolean;
+	groupModulesByPath: boolean;
+	groupModulesByExtension: boolean;
+	groupModulesByType: boolean;
+	entrypoints: boolean | "auto";
+	chunkGroups: boolean;
+	chunkGroupAuxiliary: boolean;
+	chunkGroupChildren: boolean;
+	chunkGroupMaxAssets: number;
+	modulesSpace: number;
+	chunkModulesSpace: number;
+	nestedModulesSpace: number;
+	logging: false | "none" | "error" | "warn" | "info" | "log" | "verbose";
+	loggingDebug: ((value: string) => boolean)[];
+	loggingTrace: boolean;
+	chunkModules: boolean;
+	chunkRelations: boolean;
+	reasons: boolean;
+	moduleAssets: boolean;
+	nestedModules: boolean;
+	source: boolean;
+	usedExports: boolean;
+	providedExports: boolean;
+	optimizationBailout: boolean;
+	depth: boolean;
+	assets: boolean;
+	chunks: boolean;
+	errors: boolean;
+	errorsCount: boolean;
+	hash: boolean;
+	modules: boolean;
+	warnings: boolean;
+	warningsCount: boolean;
+}
+
+export type CreateStatsOptionsContext = KnownCreateStatsOptionsContext &
+	Record<string, any>;
+
+export type NormalizedStatsOptions = KnownNormalizedStatsOptions &
+	Omit<StatsOptions, keyof KnownNormalizedStatsOptions> &
 	Record<string, any>;
 
 export class Compilation {
 	#inner: JsCompilation;
+	#shutdown: boolean;
 
-	hooks: {
-		processAssets: ReturnType<typeof createFakeProcessAssetsHook>;
-		log: tapable.SyncBailHook<[string, LogEntry], true>;
+	hooks: Readonly<{
+		processAssets: liteTapable.AsyncSeriesHook<Assets>;
+		afterProcessAssets: liteTapable.SyncHook<Assets>;
+		childCompiler: liteTapable.SyncHook<[Compiler, string, number]>;
+		log: liteTapable.SyncBailHook<[string, LogEntry], true>;
 		additionalAssets: any;
-		optimizeModules: tapable.SyncBailHook<Iterable<JsModule>, undefined>;
-		optimizeTree: tapable.AsyncSeriesBailHook<
-			[Iterable<JsChunk>, Iterable<JsModule>],
-			undefined
+		optimizeModules: liteTapable.SyncBailHook<Iterable<Module>, void>;
+		afterOptimizeModules: liteTapable.SyncHook<Iterable<Module>, void>;
+		optimizeTree: liteTapable.AsyncSeriesHook<
+			[Iterable<Chunk>, Iterable<Module>]
 		>;
-		optimizeChunkModules: tapable.AsyncSeriesBailHook<
-			[Iterable<JsChunk>, Iterable<JsModule>],
-			undefined
+		optimizeChunkModules: liteTapable.AsyncSeriesBailHook<
+			[Iterable<Chunk>, Iterable<Module>],
+			void
 		>;
-		finishModules: tapable.AsyncSeriesHook<[Iterable<JsModule>], undefined>;
-		chunkAsset: tapable.SyncHook<[JsChunk, string], undefined>;
-		processWarnings: tapable.SyncWaterfallHook<[Error[]]>;
-		succeedModule: tapable.SyncHook<[JsModule], undefined>;
-		stillValidModule: tapable.SyncHook<[JsModule], undefined>;
-		statsFactory: tapable.SyncHook<[StatsFactory, StatsOptions], void>;
-		statsPrinter: tapable.SyncHook<[StatsPrinter, StatsOptions], void>;
-		buildModule: tapable.SyncHook<[NormalizedJsModule]>;
-	};
-	options: RspackOptionsNormalized;
-	outputOptions: OutputNormalized;
-	compiler: Compiler;
-	resolverFactory: ResolverFactory;
-	inputFileSystem: any;
-	logging: Map<string, LogEntry[]>;
+		finishModules: liteTapable.AsyncSeriesHook<[Iterable<Module>], void>;
+		chunkHash: liteTapable.SyncHook<[Chunk, Hash], void>;
+		chunkAsset: liteTapable.SyncHook<[Chunk, string], void>;
+		processWarnings: liteTapable.SyncWaterfallHook<[Error[]]>;
+		succeedModule: liteTapable.SyncHook<[Module], void>;
+		stillValidModule: liteTapable.SyncHook<[Module], void>;
+
+		statsPreset: liteTapable.HookMap<
+			liteTapable.SyncHook<
+				[Partial<StatsOptions>, CreateStatsOptionsContext],
+				void
+			>
+		>;
+		statsNormalize: liteTapable.SyncHook<
+			[Partial<StatsOptions>, CreateStatsOptionsContext],
+			void
+		>;
+		statsFactory: liteTapable.SyncHook<[StatsFactory, StatsOptions], void>;
+		statsPrinter: liteTapable.SyncHook<[StatsPrinter, StatsOptions], void>;
+
+		buildModule: liteTapable.SyncHook<[Module]>;
+		executeModule: liteTapable.SyncHook<
+			[ExecuteModuleArgument, ExecuteModuleContext]
+		>;
+		additionalTreeRuntimeRequirements: liteTapable.SyncHook<
+			[Chunk, Set<string>],
+			void
+		>;
+		runtimeRequirementInTree: liteTapable.HookMap<
+			liteTapable.SyncBailHook<[Chunk, Set<string>], void>
+		>;
+		runtimeModule: liteTapable.SyncHook<[JsRuntimeModule, Chunk], void>;
+		seal: liteTapable.SyncHook<[], void>;
+		afterSeal: liteTapable.AsyncSeriesHook<[], void>;
+		needAdditionalPass: liteTapable.SyncBailHook<[], boolean>;
+	}>;
 	name?: string;
-	childrenCounters: Record<string, number> = {};
 	startTime?: number;
 	endTime?: number;
-	normalModuleFactory?: NormalModuleFactory;
-	children: Compilation[] = [];
-	contextModuleFactory?: ContextModuleFactory;
+	compiler: Compiler;
+	resolverFactory: ResolverFactory;
+
+	inputFileSystem: InputFileSystem | null;
+	options: RspackOptionsNormalized;
+	outputOptions: OutputNormalized;
+	logging: Map<string, LogEntry[]>;
+	childrenCounters: Record<string, number>;
+	children: Compilation[];
+	chunkGraph: ChunkGraph;
+	moduleGraph: ModuleGraph;
 	fileSystemInfo = {
 		createSnapshot() {
 			// fake implement to support html-webpack-plugin
 			return null;
 		}
 	};
+	needAdditionalPass: boolean;
+
+	#addIncludeDispatcher: AddIncludeDispatcher;
 
 	constructor(compiler: Compiler, inner: JsCompilation) {
-		this.name = undefined;
-		this.startTime = undefined;
-		this.endTime = undefined;
-		const processAssetsHooks = createFakeProcessAssetsHook(this);
+		this.#inner = inner;
+		this.#shutdown = false;
+
+		const processAssetsHook = new liteTapable.AsyncSeriesHook<Assets>([
+			"assets"
+		]);
+		const createProcessAssetsHook = <T>(
+			name: string,
+			stage: number,
+			getArgs: () => liteTapable.AsArray<T>,
+			code?: string
+		) => {
+			const errorMessage = (
+				reason: string
+			) => `Can't automatically convert plugin using Compilation.hooks.${name} to Compilation.hooks.processAssets because ${reason}.
+BREAKING CHANGE: Asset processing hooks in Compilation has been merged into a single Compilation.hooks.processAssets hook.`;
+			const getOptions = (options: liteTapable.Options) => {
+				const isString = typeof options === "string";
+				if (!isString && options.stage) {
+					throw new Error(errorMessage("it's using the 'stage' option"));
+				}
+				return {
+					...(isString ? { name: options } : options),
+					stage: stage
+				};
+			};
+			return Object.freeze({
+				name,
+				intercept() {
+					throw new Error(errorMessage("it's using 'intercept'"));
+				},
+				tap: (options: liteTapable.Options, fn: liteTapable.Fn<T, void>) => {
+					processAssetsHook.tap(getOptions(options), () => fn(...getArgs()));
+				},
+				tapAsync: (
+					options: liteTapable.Options,
+					fn: liteTapable.FnAsync<T, void>
+				) => {
+					processAssetsHook.tapAsync(getOptions(options), (assets, callback) =>
+						(fn as any)(...getArgs(), callback)
+					);
+				},
+				tapPromise: (
+					options: liteTapable.Options,
+					fn: liteTapable.FnPromise<T, void>
+				) => {
+					processAssetsHook.tapPromise(getOptions(options), () =>
+						fn(...getArgs())
+					);
+				},
+				_fakeHook: true
+			});
+		};
 		this.hooks = {
-			processAssets: processAssetsHooks,
-			// TODO: webpack 6 deprecate, keep it just for compatibility
+			processAssets: processAssetsHook,
+			afterProcessAssets: new liteTapable.SyncHook(["assets"]),
 			/** @deprecated */
 			additionalAssets: createProcessAssetsHook(
-				processAssetsHooks,
 				"additionalAssets",
 				Compilation.PROCESS_ASSETS_STAGE_ADDITIONAL,
 				() => []
 			),
-			log: new tapable.SyncBailHook(["origin", "logEntry"]),
-			optimizeModules: new tapable.SyncBailHook(["modules"]),
-			optimizeTree: new tapable.AsyncSeriesBailHook(["chunks", "modules"]),
-			optimizeChunkModules: new tapable.AsyncSeriesBailHook([
+			childCompiler: new liteTapable.SyncHook([
+				"childCompiler",
+				"compilerName",
+				"compilerIndex"
+			]),
+			log: new liteTapable.SyncBailHook(["origin", "logEntry"]),
+			optimizeModules: new liteTapable.SyncBailHook(["modules"]),
+			afterOptimizeModules: new liteTapable.SyncBailHook(["modules"]),
+			optimizeTree: new liteTapable.AsyncSeriesHook(["chunks", "modules"]),
+			optimizeChunkModules: new liteTapable.AsyncSeriesBailHook([
 				"chunks",
 				"modules"
 			]),
-			finishModules: new tapable.AsyncSeriesHook(["modules"]),
-			chunkAsset: new tapable.SyncHook(["chunk", "filename"]),
-			processWarnings: new tapable.SyncWaterfallHook(["warnings"]),
-			succeedModule: new tapable.SyncHook(["module"]),
-			stillValidModule: new tapable.SyncHook(["module"]),
-			statsFactory: new tapable.SyncHook(["statsFactory", "options"]),
-			statsPrinter: new tapable.SyncHook(["statsPrinter", "options"]),
-			buildModule: new tapable.SyncHook(["module"])
+			finishModules: new liteTapable.AsyncSeriesHook(["modules"]),
+			chunkHash: new liteTapable.SyncHook(["chunk", "hash"]),
+			chunkAsset: new liteTapable.SyncHook(["chunk", "filename"]),
+			processWarnings: new liteTapable.SyncWaterfallHook(["warnings"]),
+			succeedModule: new liteTapable.SyncHook(["module"]),
+			stillValidModule: new liteTapable.SyncHook(["module"]),
+
+			statsPreset: new liteTapable.HookMap(
+				() => new liteTapable.SyncHook(["options", "context"])
+			),
+			statsNormalize: new liteTapable.SyncHook(["options", "context"]),
+			statsFactory: new liteTapable.SyncHook(["statsFactory", "options"]),
+			statsPrinter: new liteTapable.SyncHook(["statsPrinter", "options"]),
+
+			buildModule: new liteTapable.SyncHook(["module"]),
+			executeModule: new liteTapable.SyncHook(["options", "context"]),
+			additionalTreeRuntimeRequirements: new liteTapable.SyncHook([
+				"chunk",
+				"runtimeRequirements"
+			]),
+			runtimeRequirementInTree: new liteTapable.HookMap(
+				() => new liteTapable.SyncBailHook(["chunk", "runtimeRequirements"])
+			),
+			runtimeModule: new liteTapable.SyncHook(["module", "chunk"]),
+			seal: new liteTapable.SyncHook([]),
+			afterSeal: new liteTapable.AsyncSeriesHook([]),
+			needAdditionalPass: new liteTapable.SyncBailHook([])
 		};
 		this.compiler = compiler;
 		this.resolverFactory = compiler.resolverFactory;
@@ -162,28 +373,112 @@ export class Compilation {
 		this.options = compiler.options;
 		this.outputOptions = compiler.options.output;
 		this.logging = new Map();
-		this.#inner = inner;
-		// Cache the current NormalModuleHooks
+		this.childrenCounters = {};
+		this.children = [];
+		this.needAdditionalPass = false;
+
+		this.chunkGraph = ChunkGraph.__from_binding(inner.chunkGraph);
+		this.moduleGraph = ModuleGraph.__from_binding(inner.moduleGraph);
+
+		this.#addIncludeDispatcher = new AddIncludeDispatcher(
+			inner.addInclude.bind(inner)
+		);
 	}
 
-	get currentNormalModuleHooks() {
-		return NormalModule.getCompilationHooks(this);
-	}
-
-	get hash() {
+	get hash(): Readonly<string | null> {
 		return this.#inner.hash;
 	}
 
-	get fullHash() {
+	get fullHash(): Readonly<string | null> {
 		return this.#inner.hash;
 	}
 
 	/**
 	 * Get a map of all assets.
-	 *
-	 * Source: [assets](https://github.com/webpack/webpack/blob/9fcaa243573005d6fdece9a3f8d89a0e8b399613/lib/Compilation.js#L1008-L1009)
 	 */
 	get assets(): Record<string, Source> {
+		return this.#createCachedAssets();
+	}
+
+	/**
+	 * Get a map of all entrypoints.
+	 */
+	get entrypoints(): ReadonlyMap<string, Entrypoint> {
+		return new Map(
+			this.#inner.entrypoints.map(binding => {
+				const entrypoint = Entrypoint.__from_binding(binding);
+				return [entrypoint.name!, entrypoint];
+			})
+		);
+	}
+
+	get chunkGroups(): ReadonlyArray<ChunkGroup> {
+		return this.#inner.chunkGroups.map(binding =>
+			ChunkGroup.__from_binding(binding)
+		);
+	}
+
+	/**
+	 * Get the named chunk groups.
+	 *
+	 * Note: This is a proxy for webpack internal API, only method `get`, `keys`, `values` and `entries` are supported now.
+	 */
+	get namedChunkGroups() {
+		return createReadonlyMap<ChunkGroup>({
+			keys: (): ReturnType<string[]["values"]> => {
+				const names = this.#inner.getNamedChunkGroupKeys();
+				return names[Symbol.iterator]();
+			},
+			get: (property: unknown) => {
+				if (typeof property === "string") {
+					const binding = this.#inner.getNamedChunkGroup(property);
+					return ChunkGroup.__from_binding(binding);
+				}
+			}
+		});
+	}
+
+	get modules(): ReadonlySet<Module> {
+		return new Set(
+			this.#inner.modules.map(module => Module.__from_binding(module))
+		);
+	}
+
+	get builtModules(): ReadonlySet<Module> {
+		return new Set(
+			this.#inner.builtModules.map(module => Module.__from_binding(module))
+		);
+	}
+
+	get chunks(): ReadonlySet<Chunk> {
+		return new Set(this.__internal__getChunks());
+	}
+
+	/**
+	 * Get the named chunks.
+	 *
+	 * Note: This is a proxy for webpack internal API, only method `get`, `keys`, `values` and `entries` are supported now.
+	 */
+	get namedChunks() {
+		return createReadonlyMap<Chunk>({
+			keys: (): ReturnType<string[]["values"]> => {
+				const names = this.#inner.getNamedChunkKeys();
+				return names[Symbol.iterator]();
+			},
+			get: (property: unknown) => {
+				if (typeof property === "string") {
+					const binding = this.#inner.getNamedChunk(property);
+					return binding ? Chunk.__from_binding(binding) : undefined;
+				}
+			}
+		});
+	}
+
+	get entries(): Map<string, EntryData> {
+		return new Entries(this.#inner.entries);
+	}
+
+	#createCachedAssets() {
 		return new Proxy(
 			{},
 			{
@@ -192,14 +487,14 @@ export class Compilation {
 						return this.__internal__getAssetSource(property);
 					}
 				},
-				set: (target, p, newValue, receiver) => {
+				set: (_, p, newValue) => {
 					if (typeof p === "string") {
 						this.__internal__setAssetSource(p, newValue);
 						return true;
 					}
 					return false;
 				},
-				deleteProperty: (target, p) => {
+				deleteProperty: (_, p) => {
 					if (typeof p === "string") {
 						this.__internal__deleteAssetSource(p);
 						return true;
@@ -227,100 +522,38 @@ export class Compilation {
 		);
 	}
 
-	/**
-	 * Get a map of all entrypoints.
-	 */
-	get entrypoints(): ReadonlyMap<string, ChunkGroup> {
-		return new Map(
-			Object.entries(this.#inner.entrypoints).map(([n, e]) => [
-				n,
-				new ChunkGroup(e)
-			])
-		);
-	}
-
 	getCache(name: string) {
 		return this.compiler.getCache(name);
 	}
 
 	createStatsOptions(
-		optionsOrPreset: StatsValue | undefined,
+		statsValue: StatsValue | undefined,
 		context: CreateStatsOptionsContext = {}
-	): StatsOptions {
-		optionsOrPreset = normalizeStatsPreset(optionsOrPreset);
-
-		let options: Partial<StatsOptions> = {};
-		if (typeof optionsOrPreset === "object" && optionsOrPreset !== null) {
-			options = Object.assign({}, optionsOrPreset);
+	): NormalizedStatsOptions {
+		let optionsOrPreset = statsValue;
+		if (
+			typeof optionsOrPreset === "boolean" ||
+			typeof optionsOrPreset === "string"
+		) {
+			optionsOrPreset = { preset: optionsOrPreset };
 		}
-
-		const all = options.all;
-		const optionOrLocalFallback = <V, D>(v: V, def: D) =>
-			v !== undefined ? v : all !== undefined ? all : def;
-
-		options.assets = optionOrLocalFallback(options.assets, true);
-		options.chunks = optionOrLocalFallback(
-			options.chunks,
-			!context.forToString
-		);
-		options.chunkModules = optionOrLocalFallback(
-			options.chunkModules,
-			!context.forToString
-		);
-		options.chunkRelations = optionOrLocalFallback(
-			options.chunkRelations,
-			!context.forToString
-		);
-		options.modules = optionOrLocalFallback(options.modules, true);
-		options.reasons = optionOrLocalFallback(
-			options.reasons,
-			!context.forToString
-		);
-		options.entrypoints = optionOrLocalFallback(options.entrypoints, true);
-		options.chunkGroups = optionOrLocalFallback(
-			options.chunkGroups,
-			!context.forToString
-		);
-		options.errors = optionOrLocalFallback(options.errors, true);
-		options.errorsCount = optionOrLocalFallback(options.errorsCount, true);
-		options.warnings = optionOrLocalFallback(options.warnings, true);
-		options.warningsCount = optionOrLocalFallback(options.warningsCount, true);
-		options.hash = optionOrLocalFallback(options.hash, true);
-		options.version = optionOrLocalFallback(options.version, true);
-		options.publicPath = optionOrLocalFallback(options.publicPath, true);
-		options.outputPath = optionOrLocalFallback(
-			options.outputPath,
-			!context.forToString
-		);
-		options.timings = optionOrLocalFallback(options.timings, true);
-		options.builtAt = optionOrLocalFallback(
-			options.builtAt,
-			!context.forToString
-		);
-		options.moduleAssets = optionOrLocalFallback(options.moduleAssets, true);
-		options.nestedModules = optionOrLocalFallback(
-			options.nestedModules,
-			!context.forToString
-		);
-		options.source = optionOrLocalFallback(options.source, false);
-		options.logging = optionOrLocalFallback(
-			options.logging,
-			context.forToString ? "info" : true
-		);
-		options.loggingTrace = optionOrLocalFallback(
-			options.loggingTrace,
-			!context.forToString
-		);
-		options.loggingDebug = []
-			.concat(optionsOrFallback(options.loggingDebug, []))
-			.map(normalizeFilter);
-
-		options.modulesSpace =
-			options.modulesSpace || (context.forToString ? 15 : Infinity);
-
-		options.ids = optionOrLocalFallback(options.ids, !context.forToString);
-
-		return options;
+		if (typeof optionsOrPreset === "object" && optionsOrPreset !== null) {
+			// We use this method of shallow cloning this object to include
+			// properties in the prototype chain
+			const options: Partial<NormalizedStatsOptions> = {};
+			for (const key in optionsOrPreset) {
+				options[key as keyof NormalizedStatsOptions] =
+					optionsOrPreset[key as keyof StatsValue];
+			}
+			if (options.preset !== undefined) {
+				this.hooks.statsPreset.for(options.preset).call(options, context);
+			}
+			this.hooks.statsNormalize.call(options, context);
+			return options as NormalizedStatsOptions;
+		}
+		const options: Partial<NormalizedStatsOptions> = {};
+		this.hooks.statsNormalize.call(options, context);
+		return options as NormalizedStatsOptions;
 	}
 
 	createStatsFactory(options: StatsOptions) {
@@ -337,239 +570,380 @@ export class Compilation {
 
 	/**
 	 * Update an existing asset. Trying to update an asset that doesn't exist will throw an error.
-	 *
-	 * See: [Compilation.updateAsset](https://webpack.js.org/api/compilation-object/#updateasset)
-	 * Source: [updateAsset](https://github.com/webpack/webpack/blob/9fcaa243573005d6fdece9a3f8d89a0e8b399613/lib/Compilation.js#L4320)
-	 *
-	 * FIXME: *AssetInfo* may be undefined in update fn for webpack impl, but still not implemented in rspack
-	 *
-	 * @param {string} file file name
-	 * @param {Source | function(Source): Source} newSourceOrFunction new asset source or function converting old to new
-	 * @param {AssetInfo | function(AssetInfo): AssetInfo} assetInfoUpdateOrFunction new asset info or function converting old to new
 	 */
 	updateAsset(
 		filename: string,
 		newSourceOrFunction: Source | ((source: Source) => Source),
-		assetInfoUpdateOrFunction: AssetInfo | ((assetInfo: AssetInfo) => AssetInfo)
+		assetInfoUpdateOrFunction?:
+			| AssetInfo
+			| ((assetInfo: AssetInfo) => AssetInfo)
 	) {
 		let compatNewSourceOrFunction:
-			| JsCompatSource
-			| ((source: JsCompatSource) => JsCompatSource);
+			| JsCompatSourceOwned
+			| ((source: JsCompatSourceOwned) => JsCompatSourceOwned);
 
 		if (typeof newSourceOrFunction === "function") {
 			compatNewSourceOrFunction = function newSourceFunction(
-				source: JsCompatSource
+				source: JsCompatSourceOwned
 			) {
-				return createRawFromSource(
-					newSourceOrFunction(createSourceFromRaw(source))
+				return JsSource.__to_binding(
+					newSourceOrFunction(JsSource.__from_binding(source))
 				);
 			};
 		} else {
-			compatNewSourceOrFunction = createRawFromSource(newSourceOrFunction);
+			compatNewSourceOrFunction = JsSource.__to_binding(newSourceOrFunction);
 		}
 
 		this.#inner.updateAsset(
 			filename,
 			compatNewSourceOrFunction,
-			typeof assetInfoUpdateOrFunction === "function"
-				? jsAssetInfo => toJsAssetInfo(assetInfoUpdateOrFunction(jsAssetInfo))
-				: toJsAssetInfo(assetInfoUpdateOrFunction)
+			assetInfoUpdateOrFunction === undefined
+				? assetInfoUpdateOrFunction
+				: typeof assetInfoUpdateOrFunction === "function"
+					? assetInfo => assetInfoUpdateOrFunction(assetInfo)
+					: assetInfoUpdateOrFunction
 		);
 	}
 
 	/**
-	 *
-	 * @param moduleIdentifier moduleIdentifier of the module you want to modify
-	 * @param source
-	 * @returns true if the setting is success, false if failed.
-	 */
-	setNoneAstModuleSource(
-		moduleIdentifier: string,
-		source: JsCompatSource
-	): boolean {
-		return this.#inner.setNoneAstModuleSource(moduleIdentifier, source);
-	}
-	/**
 	 * Emit an not existing asset. Trying to emit an asset that already exists will throw an error.
 	 *
-	 * See: [Compilation.emitAsset](https://webpack.js.org/api/compilation-object/#emitasset)
-	 * Source: [emitAsset](https://github.com/webpack/webpack/blob/9fcaa243573005d6fdece9a3f8d89a0e8b399613/lib/Compilation.js#L4239)
-	 *
-	 * @param {string} file file name
-	 * @param {Source} source asset source
-	 * @param {JsAssetInfo} assetInfo extra asset information
-	 * @returns {void}
+	 * @param file - file name
+	 * @param source - asset source
+	 * @param assetInfo - extra asset information
 	 */
 	emitAsset(filename: string, source: Source, assetInfo?: AssetInfo) {
-		this.#inner.emitAsset(
-			filename,
-			createRawFromSource(source),
-			toJsAssetInfo(assetInfo)
-		);
+		this.#inner.emitAsset(filename, JsSource.__to_binding(source), assetInfo);
 	}
 
 	deleteAsset(filename: string) {
 		this.#inner.deleteAsset(filename);
 	}
 
+	renameAsset(filename: string, newFilename: string) {
+		this.#inner.renameAsset(filename, newFilename);
+	}
+
 	/**
 	 * Get an array of Asset
-	 *
-	 * See: [Compilation.getAssets](https://webpack.js.org/api/compilation-object/#getassets)
-	 * Source: [getAssets](https://github.com/webpack/webpack/blob/9fcaa243573005d6fdece9a3f8d89a0e8b399613/lib/Compilation.js#L4448)
 	 */
-	getAssets(): Readonly<Asset>[] {
+	getAssets(): ReadonlyArray<Asset> {
 		const assets = this.#inner.getAssets();
 
 		return assets.map(asset => {
-			return {
-				...asset,
-				get source() {
-					return asset.source ? createSourceFromRaw(asset.source) : undefined;
+			return Object.defineProperties(asset, {
+				info: {
+					value: asset.info
+				},
+				source: {
+					get: () => this.__internal__getAssetSource(asset.name)
 				}
-			};
+			}) as unknown as Asset;
 		});
 	}
 
-	getAsset(name: string) {
+	getAsset(name: string): Readonly<Asset> | void {
 		const asset = this.#inner.getAsset(name);
 		if (!asset) {
 			return;
 		}
-		return {
-			...asset,
-			// @ts-expect-error
-			source: createSourceFromRaw(asset.source)
-		};
+		return Object.defineProperties(asset, {
+			info: {
+				value: asset.info
+			},
+			source: {
+				get: () => this.__internal__getAssetSource(asset.name)
+			}
+		}) as unknown as Asset;
 	}
 
-	pushDiagnostic(
-		severity: "error" | "warning",
-		title: string,
-		message: string
-	) {
-		this.#inner.pushDiagnostic(severity, title, message);
+	/**
+	 * Note: This is not a webpack public API, maybe removed in future.
+	 *
+	 * @internal
+	 */
+	__internal__pushRspackDiagnostic(diagnostic: binding.JsRspackDiagnostic) {
+		this.#inner.pushDiagnostic(diagnostic);
 	}
 
-	__internal__pushNativeDiagnostics(diagnostics: ExternalObject<any>) {
+	/**
+	 * Note: This is not a webpack public API, maybe removed in future.
+	 *
+	 * @internal
+	 */
+	__internal__pushDiagnostic(diagnostic: ExternalObject<"Diagnostic">) {
+		this.#inner.pushNativeDiagnostic(diagnostic);
+	}
+
+	/**
+	 * Note: This is not a webpack public API, maybe removed in future.
+	 *
+	 * @internal
+	 */
+	__internal__pushDiagnostics(diagnostics: ExternalObject<"Diagnostic[]">) {
 		this.#inner.pushNativeDiagnostics(diagnostics);
 	}
 
-	get errors() {
+	get errors(): RspackError[] {
 		const inner = this.#inner;
-		return {
-			push: (...errs: (Error | JsStatsError | string)[]) => {
-				// compatible for javascript array
-				for (let i = 0; i < errs.length; i++) {
-					const error = errs[i];
-					if (isJsStatsError(error)) {
-						this.#inner.pushDiagnostic(
-							"error",
-							error.title,
-							concatErrorMsgAndStack(error)
-						);
-					} else if (typeof error === "string") {
-						this.#inner.pushDiagnostic("error", "Error", error);
-					} else {
-						this.#inner.pushDiagnostic(
-							"error",
-							error.name,
-							concatErrorMsgAndStack(error)
+		type ErrorType = RspackError;
+		const errors = inner.getErrors();
+		const proxyMethod = [
+			{
+				method: "push",
+				handler(
+					target: typeof Array.prototype.push,
+					thisArg: Array<ErrorType>,
+					errs: ErrorType[]
+				) {
+					for (let i = 0; i < errs.length; i++) {
+						const error = errs[i];
+						inner.pushDiagnostic(
+							JsRspackDiagnostic.__to_binding(error, JsRspackSeverity.Error)
 						);
 					}
+					return Reflect.apply(target, thisArg, errs);
 				}
 			},
-			[Symbol.iterator]() {
-				// TODO: this is obviously a bad design, optimize this after finishing angular prototype
-				const errors = inner.getStats().getErrors();
-				let index = 0;
-				return {
-					next() {
-						if (index >= errors.length) {
-							return { done: true };
-						}
-						return {
-							value: errors[index++],
-							done: false
-						};
-					}
-				};
+			{
+				method: "pop",
+				handler(target: typeof Array.prototype.pop, thisArg: Array<ErrorType>) {
+					inner.spliceDiagnostic(errors.length - 1, errors.length, []);
+					return Reflect.apply(target, thisArg, []);
+				}
+			},
+			{
+				method: "shift",
+				handler(
+					target: typeof Array.prototype.shift,
+					thisArg: Array<ErrorType>
+				) {
+					inner.spliceDiagnostic(0, 1, []);
+					return Reflect.apply(target, thisArg, []);
+				}
+			},
+			{
+				method: "unshift",
+				handler(
+					target: typeof Array.prototype.unshift,
+					thisArg: Array<ErrorType>,
+					errs: ErrorType[]
+				) {
+					const errList = errs.map(error => {
+						return JsRspackDiagnostic.__to_binding(
+							error,
+							JsRspackSeverity.Error
+						);
+					});
+					inner.spliceDiagnostic(0, 0, errList);
+					return Reflect.apply(target, thisArg, errs);
+				}
+			},
+			{
+				method: "splice",
+				handler(
+					target: typeof Array.prototype.splice,
+					thisArg: Array<ErrorType>,
+					[startIdx, delCount, ...errors]: [number, number, ...ErrorType[]]
+				) {
+					const errList = errors.map(error => {
+						return JsRspackDiagnostic.__to_binding(
+							error,
+							JsRspackSeverity.Error
+						);
+					});
+					inner.spliceDiagnostic(startIdx, startIdx + delCount, errList);
+					return Reflect.apply(target, thisArg, [
+						startIdx,
+						delCount,
+						...errors
+					]);
+				}
 			}
-		};
+		];
+
+		for (const item of proxyMethod) {
+			const proxiedMethod = new Proxy(errors[item.method as any], {
+				apply: item.handler as any
+			});
+			errors[item.method as any] = proxiedMethod;
+		}
+		return errors;
 	}
 
-	get warnings() {
+	set errors(errors: RspackError[]) {
 		const inner = this.#inner;
-		return {
-			// compatible for javascript array
-			push: (...warns: (Error | JsStatsError)[]) => {
-				// TODO: find a way to make JsStatsError be actual errors
-				warns = this.hooks.processWarnings.call(warns as any);
-				for (let i = 0; i < warns.length; i++) {
-					const warn = warns[i];
-					this.#inner.pushDiagnostic(
-						"warning",
-						isJsStatsError(warn) ? warn.title : warn.name,
-						concatErrorMsgAndStack(warn)
+		const length = inner.getErrors().length;
+		inner.spliceDiagnostic(
+			0,
+			length,
+			errors.map(error => {
+				return JsRspackDiagnostic.__to_binding(error, JsRspackSeverity.Error);
+			})
+		);
+	}
+
+	get warnings(): RspackError[] {
+		const inner = this.#inner;
+		type WarnType = Error | RspackError;
+		const processWarningsHook = this.hooks.processWarnings;
+		const warnings = inner.getWarnings();
+		const proxyMethod = [
+			{
+				method: "push",
+				handler(
+					target: typeof Array.prototype.push,
+					thisArg: Array<WarnType>,
+					warns: WarnType[]
+				) {
+					return Reflect.apply(
+						target,
+						thisArg,
+						processWarningsHook.call(warns as any).map(warn => {
+							inner.pushDiagnostic(
+								JsRspackDiagnostic.__to_binding(warn, JsRspackSeverity.Warn)
+							);
+							return warn;
+						})
 					);
 				}
 			},
-			[Symbol.iterator]() {
-				// TODO: this is obviously a bad design, optimize this after finishing angular prototype
-				const warnings = inner.getStats().getWarnings();
-				let index = 0;
-				return {
-					next() {
-						if (index >= warnings.length) {
-							return { done: true };
-						}
-						return {
-							value: [warnings[index++]],
-							done: false
-						};
-					}
-				};
+			{
+				method: "pop",
+				handler(target: typeof Array.prototype.pop, thisArg: Array<WarnType>) {
+					inner.spliceDiagnostic(warnings.length - 1, warnings.length, []);
+					return Reflect.apply(target, thisArg, []);
+				}
+			},
+			{
+				method: "shift",
+				handler(
+					target: typeof Array.prototype.shift,
+					thisArg: Array<WarnType>
+				) {
+					inner.spliceDiagnostic(0, 1, []);
+					return Reflect.apply(target, thisArg, []);
+				}
+			},
+			{
+				method: "unshift",
+				handler(
+					target: typeof Array.prototype.unshift,
+					thisArg: Array<WarnType>,
+					warns: WarnType[]
+				) {
+					const warnings = processWarningsHook.call(warns as any);
+					inner.spliceDiagnostic(
+						0,
+						0,
+						warnings.map(warn => {
+							return JsRspackDiagnostic.__to_binding(
+								warn,
+								JsRspackSeverity.Warn
+							);
+						})
+					);
+					return Reflect.apply(target, thisArg, warnings);
+				}
+			},
+			{
+				method: "splice",
+				handler(
+					target: typeof Array.prototype.splice,
+					thisArg: Array<WarnType>,
+					[startIdx, delCount, ...warns]: [number, number, ...WarnType[]]
+				) {
+					warns = processWarningsHook.call(warns as any);
+					const warnList = warns.map(warn => {
+						return JsRspackDiagnostic.__to_binding(warn, JsRspackSeverity.Warn);
+					});
+					inner.spliceDiagnostic(startIdx, startIdx + delCount, warnList);
+					return Reflect.apply(target, thisArg, [
+						startIdx,
+						delCount,
+						...warnList
+					]);
+				}
 			}
-		};
+		];
+
+		for (const item of proxyMethod) {
+			const proxiedMethod = new Proxy(warnings[item.method as any], {
+				apply: item.handler as any
+			});
+			warnings[item.method as any] = proxiedMethod;
+		}
+		return warnings;
 	}
 
-	getPath(filename: string, data: PathData = {}) {
-		return this.#inner.getPath(filename, data);
+	set warnings(warnings: RspackError[]) {
+		const inner = this.#inner;
+		const length = inner.getWarnings().length;
+		inner.spliceDiagnostic(
+			0,
+			length,
+			warnings.map(warning => {
+				return JsRspackDiagnostic.__to_binding(warning, JsRspackSeverity.Warn);
+			})
+		);
 	}
 
-	getPathWithInfo(filename: string, data: PathData = {}) {
-		return this.#inner.getPathWithInfo(filename, data);
+	getPath(filename: Filename, data: PathData = {}) {
+		const pathData: JsPathData = { ...data };
+		if (data.contentHashType && data.chunk?.contentHash) {
+			pathData.contentHash = data.chunk.contentHash[data.contentHashType];
+		}
+		return this.#inner.getPath(filename, pathData);
 	}
 
-	getAssetPath(filename: string, data: PathData = {}) {
-		return this.#inner.getAssetPath(filename, data);
+	getPathWithInfo(filename: Filename, data: PathData = {}) {
+		const pathData: JsPathData = { ...data };
+		if (data.contentHashType && data.chunk?.contentHash) {
+			pathData.contentHash = data.chunk.contentHash[data.contentHashType];
+		}
+		return this.#inner.getPathWithInfo(filename, pathData);
 	}
 
-	getAssetPathWithInfo(filename: string, data: PathData = {}) {
-		return this.#inner.getAssetPathWithInfo(filename, data);
+	getAssetPath(filename: Filename, data: PathData = {}) {
+		const pathData: JsPathData = { ...data };
+		if (data.contentHashType && data.chunk?.contentHash) {
+			pathData.contentHash = data.chunk.contentHash[data.contentHashType];
+		}
+		return this.#inner.getAssetPath(filename, pathData);
+	}
+
+	getAssetPathWithInfo(filename: Filename, data: PathData = {}) {
+		const pathData: JsPathData = { ...data };
+		if (data.contentHashType && data.chunk?.contentHash) {
+			pathData.contentHash = data.chunk.contentHash[data.contentHashType];
+		}
+		return this.#inner.getAssetPathWithInfo(filename, pathData);
 	}
 
 	getLogger(name: string | (() => string)) {
 		if (!name) {
 			throw new TypeError("Compilation.getLogger(name) called without a name");
 		}
+
+		let logName = name;
 		let logEntries: LogEntry[] | undefined;
+
 		return new Logger(
 			(type, args) => {
-				if (typeof name === "function") {
-					name = name();
-					if (!name) {
+				if (typeof logName === "function") {
+					logName = logName();
+					if (!logName) {
 						throw new TypeError(
 							"Compilation.getLogger(name) called with a function not returning a name"
 						);
 					}
 				}
-				let trace: string[];
+				let trace: string[] | undefined;
 				switch (type) {
 					case LogType.warn:
 					case LogType.error:
 					case LogType.trace:
-						trace = ErrorHelpers.cutOffLoaderExecution(new Error("Trace").stack)
+						trace = cutOffLoaderExecution(new Error("Trace").stack!)
 							.split("\n")
 							.slice(3);
 						break;
@@ -577,215 +951,103 @@ export class Compilation {
 				const logEntry: LogEntry = {
 					time: Date.now(),
 					type,
-					// @ts-expect-error
 					args,
-					// @ts-expect-error
 					trace
 				};
-				if (this.hooks.log.call(name, logEntry) === undefined) {
+				if (this.hooks.log.call(logName, logEntry) === undefined) {
 					if (logEntry.type === LogType.profileEnd) {
 						if (typeof console.profileEnd === "function") {
-							console.profileEnd(`[${name}] ${logEntry.args[0]}`);
+							console.profileEnd(`[${logName}] ${logEntry.args[0]}`);
 						}
 					}
 					if (logEntries === undefined) {
-						logEntries = this.logging.get(name);
+						logEntries = this.logging.get(logName);
 						if (logEntries === undefined) {
 							logEntries = [];
-							this.logging.set(name, logEntries);
+							this.logging.set(logName, logEntries);
 						}
 					}
 					logEntries.push(logEntry);
 					if (logEntry.type === LogType.profile) {
 						if (typeof console.profile === "function") {
-							console.profile(`[${name}] ${logEntry.args[0]}`);
+							console.profile(`[${logName}] ${logEntry.args[0]}`);
 						}
 					}
 				}
 			},
 			(childName): Logger => {
-				if (typeof name === "function") {
-					if (typeof childName === "function") {
+				let normalizedChildName = childName;
+				if (typeof logName === "function") {
+					if (typeof normalizedChildName === "function") {
 						return this.getLogger(() => {
-							if (typeof name === "function") {
-								name = name();
-								if (!name) {
+							if (typeof logName === "function") {
+								logName = logName();
+								if (!logName) {
 									throw new TypeError(
 										"Compilation.getLogger(name) called with a function not returning a name"
 									);
 								}
 							}
-							if (typeof childName === "function") {
-								childName = childName();
-								if (!childName) {
+							if (typeof normalizedChildName === "function") {
+								normalizedChildName = normalizedChildName();
+								if (!normalizedChildName) {
 									throw new TypeError(
 										"Logger.getChildLogger(name) called with a function not returning a name"
 									);
 								}
 							}
-							return `${name}/${childName}`;
-						});
-					} else {
-						return this.getLogger(() => {
-							if (typeof name === "function") {
-								name = name();
-								if (!name) {
-									throw new TypeError(
-										"Compilation.getLogger(name) called with a function not returning a name"
-									);
-								}
-							}
-							return `${name}/${childName}`;
+							return `${logName}/${normalizedChildName}`;
 						});
 					}
-				} else {
-					if (typeof childName === "function") {
-						return this.getLogger(() => {
-							if (typeof childName === "function") {
-								childName = childName();
-								if (!childName) {
-									throw new TypeError(
-										"Logger.getChildLogger(name) called with a function not returning a name"
-									);
-								}
+					return this.getLogger(() => {
+						if (typeof logName === "function") {
+							logName = logName();
+							if (!logName) {
+								throw new TypeError(
+									"Compilation.getLogger(name) called with a function not returning a name"
+								);
 							}
-							return `${name}/${childName}`;
-						});
-					} else {
-						return this.getLogger(`${name}/${childName}`);
-					}
+						}
+						return `${logName}/${normalizedChildName}`;
+					});
 				}
+				if (typeof normalizedChildName === "function") {
+					return this.getLogger(() => {
+						if (typeof normalizedChildName === "function") {
+							normalizedChildName = normalizedChildName();
+							if (!normalizedChildName) {
+								throw new TypeError(
+									"Logger.getChildLogger(name) called with a function not returning a name"
+								);
+							}
+						}
+						return `${logName}/${normalizedChildName}`;
+					});
+				}
+				return this.getLogger(`${logName}/${normalizedChildName}`);
 			}
 		);
 	}
 
 	fileDependencies = createFakeCompilationDependencies(
-		() => this.#inner.getFileDependencies(),
+		() => this.#inner.dependencies().fileDependencies,
 		d => this.#inner.addFileDependencies(d)
 	);
 
 	contextDependencies = createFakeCompilationDependencies(
-		() => this.#inner.getContextDependencies(),
+		() => this.#inner.dependencies().contextDependencies,
 		d => this.#inner.addContextDependencies(d)
 	);
 
 	missingDependencies = createFakeCompilationDependencies(
-		() => this.#inner.getMissingDependencies(),
+		() => this.#inner.dependencies().missingDependencies,
 		d => this.#inner.addMissingDependencies(d)
 	);
 
 	buildDependencies = createFakeCompilationDependencies(
-		() => this.#inner.getBuildDependencies(),
+		() => this.#inner.dependencies().buildDependencies,
 		d => this.#inner.addBuildDependencies(d)
 	);
-
-	get modules() {
-		return this.__internal__getModules().map(item => normalizeJsModule(item));
-	}
-
-	// FIXME: This is not aligned with Webpack.
-	get chunks() {
-		const stats = this.getStats().toJson({
-			all: false,
-			chunks: true,
-			chunkModules: true,
-			reasons: true
-		});
-		const chunks = stats.chunks?.map(chunk => {
-			return {
-				...chunk,
-				name: chunk.names.length > 0 ? chunk.names[0] : "",
-				modules: this.__internal__getAssociatedModules(chunk),
-				isOnlyInitial: function () {
-					return this.initial;
-				}
-			};
-		});
-		return chunks;
-	}
-
-	/**
-	 * Get the named chunks.
-	 *
-	 * Note: This is a proxy for webpack internal API, only method `get` is supported now.
-	 */
-	get namedChunks(): Map<string, Readonly<JsChunk>> {
-		return {
-			get: (property: unknown) => {
-				if (typeof property === "string") {
-					return this.#inner.getNamedChunk(property) ?? undefined;
-				}
-			}
-		} as Map<string, Readonly<JsChunk>>;
-	}
-
-	/**
-	 * Get the associated `modules` of an given chunk.
-	 *
-	 * Note: This is not a webpack public API, maybe removed in future.
-	 *
-	 * @internal
-	 */
-	__internal__getAssociatedModules(chunk: JsStatsChunk): any[] | undefined {
-		const modules = this.__internal__getModules();
-		const moduleMap: Map<string, JsModule> = new Map();
-		for (const module of modules) {
-			moduleMap.set(module.moduleIdentifier, module);
-		}
-		return chunk.modules?.flatMap(chunkModule => {
-			const jsModule = this.__internal__findJsModule(
-				chunkModule.issuer ?? chunkModule.identifier,
-				moduleMap
-			);
-			return {
-				...jsModule
-				// dependencies: chunkModule.reasons?.flatMap(jsReason => {
-				// 	let jsOriginModule = this.__internal__findJsModule(
-				// 		jsReason.moduleIdentifier ?? "",
-				// 		moduleMap
-				// 	);
-				// 	return {
-				// 		...jsReason,
-				// 		originModule: jsOriginModule
-				// 	};
-				// })
-			};
-		});
-	}
-
-	/**
-	 * Find a modules in an array.
-	 *
-	 * Note: This is not a webpack public API, maybe removed in future.
-	 *
-	 * @internal
-	 */
-	__internal__findJsModule(
-		identifier: string,
-		modules: Map<string, JsModule>
-	): JsModule | undefined {
-		return modules.get(identifier);
-	}
-
-	/**
-	 *
-	 * Note: This is not a webpack public API, maybe removed in future.
-	 *
-	 * @internal
-	 */
-	__internal__getModules(): JsModule[] {
-		return this.#inner.getModules();
-	}
-
-	/**
-	 *
-	 * Note: This is not a webpack public API, maybe removed in future.
-	 *
-	 * @internal
-	 */
-	__internal__getChunks(): JsChunk[] {
-		return this.#inner.getChunks();
-	}
 
 	getStats() {
 		return new Stats(this);
@@ -807,26 +1069,48 @@ export class Compilation {
 		);
 	}
 
-	_rebuildModuleCaller = new MergeCaller(
-		(args: Array<[string, (err: any, m: JsModule) => void]>) => {
+	#rebuildModuleTask = new AsyncTask<string, Module>(
+		(moduleIdentifiers, doneWork) => {
 			this.#inner.rebuildModule(
-				args.map(item => item[0]),
-				function (err: any, modules: JsModule[]) {
-					for (const [id, callback] of args) {
-						const m = modules.find(item => item.moduleIdentifier === id);
-						if (m) {
-							callback(err, m);
-						} else {
-							callback(err || new Error("module no found"), null as any);
-						}
+				moduleIdentifiers,
+				(err: Error | null, modules: binding.JsModule[]) => {
+					/*
+					 * 	TODO:
+					 *	batch all call parameters, once a module is failed, we cannot know which module
+					 * 	is failed to rebuild, we have to make all modules failed, this should be improved
+					 *	in the future
+					 */
+					if (err) {
+						doneWork(new Array(moduleIdentifiers.length).fill([err, null]));
+					} else {
+						doneWork(
+							modules.map(jsModule => [null, Module.__from_binding(jsModule)])
+						);
 					}
 				}
 			);
-		},
-		10
+		}
 	);
-	rebuildModule(m: JsModule, f: (err: any, m: JsModule) => void) {
-		this._rebuildModuleCaller.push([m.moduleIdentifier, f]);
+
+	rebuildModule(m: Module, f: (err: Error | null, m: Module | null) => void) {
+		this.#rebuildModuleTask.exec(m.identifier(), f);
+	}
+
+	addRuntimeModule(chunk: Chunk, runtimeModule: RuntimeModule) {
+		runtimeModule.attach(this, chunk, this.chunkGraph);
+		this.#inner.addRuntimeModule(
+			Chunk.__to_binding(chunk),
+			RuntimeModule.__to_binding(this, runtimeModule)
+		);
+	}
+
+	addInclude(
+		context: string,
+		dependency: ReturnType<typeof EntryPlugin.createDependency>,
+		options: EntryOptions,
+		callback: (err?: null | WebpackError, module?: Module) => void
+	) {
+		this.#addIncludeDispatcher.call(context, dependency, options, callback);
 	}
 
 	/**
@@ -836,12 +1120,12 @@ export class Compilation {
 	 *
 	 * @internal
 	 */
-	__internal__getAssetSource(filename: string): Source | null {
+	__internal__getAssetSource(filename: string): Source | void {
 		const rawSource = this.#inner.getAssetSource(filename);
 		if (!rawSource) {
-			return null;
+			return;
 		}
-		return createSourceFromRaw(rawSource);
+		return JsSource.__from_binding(rawSource);
 	}
 
 	/**
@@ -852,7 +1136,7 @@ export class Compilation {
 	 * @internal
 	 */
 	__internal__setAssetSource(filename: string, source: Source) {
-		this.#inner.setAssetSource(filename, createRawFromSource(source));
+		this.#inner.setAssetSource(filename, JsSource.__to_binding(source));
 	}
 
 	/**
@@ -888,8 +1172,32 @@ export class Compilation {
 		return this.#inner.hasAsset(name);
 	}
 
+	/**
+	 * Note: This is not a webpack public API, maybe removed in future.
+	 *
+	 * @internal
+	 */
+	__internal__getChunks(): Chunk[] {
+		return this.#inner
+			.getChunks()
+			.map(binding => Chunk.__from_binding(binding));
+	}
+
+	/**
+	 * Note: This is not a webpack public API, maybe removed in future.
+	 *
+	 * @internal
+	 */
 	__internal_getInner() {
 		return this.#inner;
+	}
+
+	get __internal__shutdown() {
+		return this.#shutdown;
+	}
+
+	set __internal__shutdown(shutdown) {
+		this.#shutdown = shutdown;
 	}
 
 	seal() {}
@@ -911,63 +1219,158 @@ export class Compilation {
 	static PROCESS_ASSETS_STAGE_OPTIMIZE_TRANSFER = 3000;
 	static PROCESS_ASSETS_STAGE_ANALYSE = 4000;
 	static PROCESS_ASSETS_STAGE_REPORT = 5000;
+}
 
-	__internal_getProcessAssetsHookByStage(stage: number) {
-		if (stage > Compilation.PROCESS_ASSETS_STAGE_REPORT) {
-			this.pushDiagnostic(
-				"warning",
-				"not supported process_assets_stage",
-				`custom stage for process_assets is not supported yet, so ${stage} is fallback to Compilation.PROCESS_ASSETS_STAGE_REPORT(${Compilation.PROCESS_ASSETS_STAGE_REPORT}) `
-			);
-			stage = Compilation.PROCESS_ASSETS_STAGE_REPORT;
+// The AddIncludeDispatcher class has two responsibilities:
+//
+// 1. It is responsible for combining multiple addInclude calls that occur within the same event loop.
+// The purpose of this is to send these combined calls to the add_include method on the Rust side in a unified manner, thereby optimizing the call process and avoiding the overhead of multiple scattered calls.
+//
+// 2. It should be noted that the add_include method on the Rust side has a limitation. It does not allow multiple calls to execute in parallel.
+// Based on this limitation, the AddIncludeDispatcher class needs to properly coordinate and schedule the calls to ensure compliance with this execution rule.
+class AddIncludeDispatcher {
+	#inner: binding.JsCompilation["addInclude"];
+	#running: boolean;
+	#args: [string, binding.RawDependency, binding.JsEntryOptions | undefined][] =
+		[];
+	#cbs: ((err?: null | WebpackError, module?: Module) => void)[] = [];
+
+	#execute = () => {
+		if (this.#running) {
+			return;
 		}
-		if (stage < Compilation.PROCESS_ASSETS_STAGE_ADDITIONAL) {
-			this.pushDiagnostic(
-				"warning",
-				"not supported process_assets_stage",
-				`custom stage for process_assets is not supported yet, so ${stage} is fallback to Compilation.PROCESS_ASSETS_STAGE_ADDITIONAL(${Compilation.PROCESS_ASSETS_STAGE_ADDITIONAL}) `
-			);
-			stage = Compilation.PROCESS_ASSETS_STAGE_ADDITIONAL;
-		}
-		switch (stage) {
-			case Compilation.PROCESS_ASSETS_STAGE_ADDITIONAL:
-				return this.hooks.processAssets.stageAdditional;
-			case Compilation.PROCESS_ASSETS_STAGE_PRE_PROCESS:
-				return this.hooks.processAssets.stagePreProcess;
-			case Compilation.PROCESS_ASSETS_STAGE_DERIVED:
-				return this.hooks.processAssets.stageDerived;
-			case Compilation.PROCESS_ASSETS_STAGE_ADDITIONS:
-				return this.hooks.processAssets.stageAdditions;
-			case Compilation.PROCESS_ASSETS_STAGE_NONE:
-				return this.hooks.processAssets.stageNone;
-			case Compilation.PROCESS_ASSETS_STAGE_OPTIMIZE:
-				return this.hooks.processAssets.stageOptimize;
-			case Compilation.PROCESS_ASSETS_STAGE_OPTIMIZE_COUNT:
-				return this.hooks.processAssets.stageOptimizeCount;
-			case Compilation.PROCESS_ASSETS_STAGE_OPTIMIZE_COMPATIBILITY:
-				return this.hooks.processAssets.stageOptimizeCompatibility;
-			case Compilation.PROCESS_ASSETS_STAGE_OPTIMIZE_SIZE:
-				return this.hooks.processAssets.stageOptimizeSize;
-			case Compilation.PROCESS_ASSETS_STAGE_DEV_TOOLING:
-				return this.hooks.processAssets.stageDevTooling;
-			case Compilation.PROCESS_ASSETS_STAGE_OPTIMIZE_INLINE:
-				return this.hooks.processAssets.stageOptimizeInline;
-			case Compilation.PROCESS_ASSETS_STAGE_SUMMARIZE:
-				return this.hooks.processAssets.stageSummarize;
-			case Compilation.PROCESS_ASSETS_STAGE_OPTIMIZE_HASH:
-				return this.hooks.processAssets.stageOptimizeHash;
-			case Compilation.PROCESS_ASSETS_STAGE_OPTIMIZE_TRANSFER:
-				return this.hooks.processAssets.stageOptimizeTransfer;
-			case Compilation.PROCESS_ASSETS_STAGE_ANALYSE:
-				return this.hooks.processAssets.stageAnalyse;
-			case Compilation.PROCESS_ASSETS_STAGE_REPORT:
-				return this.hooks.processAssets.stageReport;
-			default:
-				throw new Error(
-					"processAssets hook uses custom stage number is not supported."
+
+		const args = this.#args;
+		this.#args = [];
+		const cbs = this.#cbs;
+		this.#cbs = [];
+		this.#inner(args, (wholeErr, results) => {
+			if (this.#args.length !== 0) {
+				queueMicrotask(this.#execute.bind(this));
+			}
+
+			if (wholeErr) {
+				const webpackError = new WebpackError(wholeErr.message);
+				for (const cb of cbs) {
+					cb(webpackError);
+				}
+				return;
+			}
+			for (let i = 0; i < results.length; i++) {
+				const [errMsg, moduleBinding] = results[i];
+				const cb = cbs[i];
+				cb(
+					errMsg ? new WebpackError(errMsg) : null,
+					Module.__from_binding(moduleBinding)
 				);
+			}
+		});
+	};
+
+	constructor(binding: binding.JsCompilation["addInclude"]) {
+		this.#inner = binding;
+		this.#running = false;
+	}
+
+	call(
+		context: string,
+		dependency: ReturnType<typeof EntryPlugin.createDependency>,
+		options: EntryOptions,
+		callback: (err?: null | WebpackError, module?: Module) => void
+	) {
+		if (this.#args.length === 0) {
+			queueMicrotask(this.#execute.bind(this));
 		}
+
+		this.#args.push([context, dependency, options as any]);
+		this.#cbs.push(callback);
 	}
 }
 
-export type { JsAssetInfo };
+export class EntryData {
+	dependencies: Dependency[];
+	includeDependencies: Dependency[];
+	options: binding.JsEntryOptions;
+
+	static __from_binding(binding: binding.JsEntryData): EntryData {
+		return new EntryData(binding);
+	}
+
+	private constructor(binding: binding.JsEntryData) {
+		this.dependencies = binding.dependencies.map(Dependency.__from_binding);
+		this.includeDependencies = binding.includeDependencies.map(
+			Dependency.__from_binding
+		);
+		this.options = binding.options;
+	}
+}
+
+export class Entries implements Map<string, EntryData> {
+	#data: binding.JsEntries;
+
+	constructor(data: binding.JsEntries) {
+		this.#data = data;
+	}
+
+	clear(): void {
+		this.#data.clear();
+	}
+
+	forEach(
+		callback: (
+			value: EntryData,
+			key: string,
+			map: Map<string, EntryData>
+		) => void,
+		thisArg?: any
+	): void {
+		for (const [key, binding] of this) {
+			const value = EntryData.__from_binding(binding);
+			callback.call(thisArg, value, key, this);
+		}
+	}
+
+	get size(): number {
+		return this.#data.size;
+	}
+
+	*entries(): ReturnType<Map<string, EntryData>["entries"]> {
+		for (const key of this.keys()) {
+			yield [key, this.get(key)!];
+		}
+	}
+
+	values(): ReturnType<Map<string, EntryData>["values"]> {
+		return this.#data.values().map(EntryData.__from_binding)[Symbol.iterator]();
+	}
+
+	[Symbol.iterator](): ReturnType<Map<string, EntryData>["entries"]> {
+		return this.entries();
+	}
+
+	get [Symbol.toStringTag](): string {
+		return "Map";
+	}
+
+	has(key: string): boolean {
+		return this.#data.has(key);
+	}
+
+	set(key: string, value: EntryData): this {
+		this.#data.set(key, value);
+		return this;
+	}
+
+	delete(key: string): boolean {
+		return this.#data.delete(key);
+	}
+
+	get(key: string): EntryData | undefined {
+		const binding = this.#data.get(key);
+		return binding ? EntryData.__from_binding(binding) : undefined;
+	}
+
+	keys(): ReturnType<Map<string, EntryData>["keys"]> {
+		return this.#data.keys()[Symbol.iterator]();
+	}
+}

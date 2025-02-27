@@ -1,33 +1,41 @@
+use rspack_cacheable::{cacheable, cacheable_dyn};
 use rspack_core::{
-  create_resource_identifier_for_context_dependency, module_id_expr, ContextOptions, Dependency,
-  DependencyCategory, DependencyId, DependencyTemplate, DependencyType, ErrorSpan,
-  ModuleDependency, RuntimeGlobals, TemplateContext, TemplateReplaceSource,
+  module_raw, AsModuleDependency, Compilation, ContextDependency, ContextOptions, Dependency,
+  DependencyCategory, DependencyId, DependencyRange, DependencyTemplate, DependencyType,
+  FactorizeInfo, ModuleGraph, RuntimeSpec, TemplateContext, TemplateReplaceSource,
 };
+use rspack_error::Diagnostic;
 
+use super::create_resource_identifier_for_context_dependency;
+
+#[cacheable]
 #[derive(Debug, Clone)]
 pub struct ImportMetaContextDependency {
-  start: u32,
-  end: u32,
-  pub id: DependencyId,
-  pub options: ContextOptions,
-  span: Option<ErrorSpan>,
+  id: DependencyId,
+  options: ContextOptions,
+  range: DependencyRange,
   resource_identifier: String,
+  optional: bool,
+  critical: Option<Diagnostic>,
+  factorize_info: FactorizeInfo,
 }
 
 impl ImportMetaContextDependency {
-  pub fn new(start: u32, end: u32, options: ContextOptions, span: Option<ErrorSpan>) -> Self {
-    let resource_identifier = create_resource_identifier_for_context_dependency(&options);
+  pub fn new(options: ContextOptions, range: DependencyRange, optional: bool) -> Self {
+    let resource_identifier = create_resource_identifier_for_context_dependency(None, &options);
     Self {
-      start,
-      end,
       options,
-      span,
-      id: DependencyId::new(),
+      range,
       resource_identifier,
+      optional,
+      id: DependencyId::new(),
+      critical: None,
+      factorize_info: Default::default(),
     }
   }
 }
 
+#[cacheable_dyn]
 impl Dependency for ImportMetaContextDependency {
   fn id(&self) -> &DependencyId {
     &self.id
@@ -41,58 +49,102 @@ impl Dependency for ImportMetaContextDependency {
     &DependencyType::ImportMetaContext
   }
 
-  fn span(&self) -> Option<ErrorSpan> {
-    self.span
+  fn range(&self) -> Option<&DependencyRange> {
+    Some(&self.range)
   }
 
-  fn dependency_debug_name(&self) -> &'static str {
-    "ImportMetaContextDependency"
+  fn could_affect_referencing_module(&self) -> rspack_core::AffectType {
+    rspack_core::AffectType::True
+  }
+
+  fn get_diagnostics(&self, _module_graph: &ModuleGraph) -> Option<Vec<Diagnostic>> {
+    if let Some(critical) = self.critical() {
+      return Some(vec![critical.clone()]);
+    }
+    None
   }
 }
 
-impl ModuleDependency for ImportMetaContextDependency {
+impl ContextDependency for ImportMetaContextDependency {
   fn request(&self) -> &str {
     &self.options.request
   }
 
-  fn user_request(&self) -> &str {
-    &self.options.request
+  fn options(&self) -> &ContextOptions {
+    &self.options
   }
 
-  fn options(&self) -> Option<&ContextOptions> {
-    Some(&self.options)
+  fn get_context(&self) -> Option<&str> {
+    None
+  }
+
+  fn resource_identifier(&self) -> &str {
+    &self.resource_identifier
   }
 
   fn set_request(&mut self, request: String) {
     self.options.request = request;
   }
 
-  fn resource_identifier(&self) -> Option<&str> {
-    Some(&self.resource_identifier)
+  fn get_optional(&self) -> bool {
+    self.optional
+  }
+
+  fn type_prefix(&self) -> rspack_core::ContextTypePrefix {
+    rspack_core::ContextTypePrefix::Normal
+  }
+
+  fn critical(&self) -> &Option<Diagnostic> {
+    &self.critical
+  }
+
+  fn critical_mut(&mut self) -> &mut Option<Diagnostic> {
+    &mut self.critical
+  }
+
+  fn factorize_info(&self) -> &FactorizeInfo {
+    &self.factorize_info
+  }
+
+  fn factorize_info_mut(&mut self) -> &mut FactorizeInfo {
+    &mut self.factorize_info
   }
 }
 
+#[cacheable_dyn]
 impl DependencyTemplate for ImportMetaContextDependency {
   fn apply(
     &self,
     source: &mut TemplateReplaceSource,
     code_generatable_context: &mut TemplateContext,
   ) {
-    let TemplateContext { compilation, .. } = code_generatable_context;
+    let TemplateContext {
+      compilation,
+      runtime_requirements,
+      ..
+    } = code_generatable_context;
 
-    let module_id = compilation
-      .module_graph
-      .module_graph_module_by_dependency_id(&self.id)
-      .map(|m| m.id(&compilation.chunk_graph))
-      .expect("should have dependency id");
-
-    let module_id_str = module_id_expr(&self.options.request, module_id);
-
-    source.replace(
-      self.start,
-      self.end,
-      format!("{}({module_id_str})", RuntimeGlobals::REQUIRE).as_str(),
-      None,
+    let content = module_raw(
+      compilation,
+      runtime_requirements,
+      &self.id,
+      &self.options.request,
+      self.optional,
     );
+    source.replace(self.range.start, self.range.end, &content, None);
+  }
+
+  fn dependency_id(&self) -> Option<DependencyId> {
+    Some(self.id)
+  }
+
+  fn update_hash(
+    &self,
+    _hasher: &mut dyn std::hash::Hasher,
+    _compilation: &Compilation,
+    _runtime: Option<&RuntimeSpec>,
+  ) {
   }
 }
+
+impl AsModuleDependency for ImportMetaContextDependency {}

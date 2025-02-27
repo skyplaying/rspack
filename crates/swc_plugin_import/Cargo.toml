@@ -2,11 +2,17 @@
 description = "babel-plugin-import rewritten in Rust"
 edition     = "2021"
 license     = "MIT"
-name        = "swc_plugin_import"
-version     = "0.1.5"
+name        = "rspack_swc_plugin_import"
+repository  = "https://github.com/web-infra-dev/rspack"
+version     = "0.2.0"
 
 [dependencies]
-handlebars = "4.3.7"
+cow-utils  = { workspace = true }
+handlebars = "6.3.0"
+heck       = { workspace = true }
 rustc-hash = { workspace = true }
 serde      = { workspace = true }
 swc_core   = { workspace = true, features = ["common", "ecma_ast", "ecma_visit"] }
+
+[package.metadata.cargo-machete]
+ignored = ["Inflector"]

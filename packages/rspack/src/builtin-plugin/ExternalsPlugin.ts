@@ -1,62 +1,141 @@
 import {
-	RawExternalItem,
-	RawExternalItemValue,
-	RawExternalsPluginOptions
+	type BuiltinPlugin,
+	BuiltinPluginName,
+	type RawExternalItemFnCtx,
+	type RawExternalsPluginOptions
 } from "@rspack/binding";
-import { BuiltinPluginName, create } from "./base";
-import { ExternalItem, ExternalItemValue, Externals } from "..";
 
-export const ExternalsPlugin = create(
-	BuiltinPluginName.ExternalsPlugin,
-	(type: string, externals: Externals): RawExternalsPluginOptions => {
-		return {
+import type { Compiler, ExternalItem, ExternalItemValue, Externals } from "..";
+import { Resolver } from "../Resolver";
+import { RspackBuiltinPlugin, createBuiltinPlugin } from "./base";
+
+export class ExternalsPlugin extends RspackBuiltinPlugin {
+	name = BuiltinPluginName.ExternalsPlugin;
+
+	constructor(
+		private type: string,
+		private externals: Externals
+	) {
+		super();
+	}
+
+	raw(compiler: Compiler): BuiltinPlugin | undefined {
+		const { type, externals } = this;
+		const raw: RawExternalsPluginOptions = {
 			type,
-			externals: (Array.isArray(externals) ? externals : [externals]).map(
-				getRawExternalItem
-			)
+			externals: (Array.isArray(externals) ? externals : [externals])
+				.filter(Boolean)
+				.map(item => getRawExternalItem(compiler, item))
 		};
+		return createBuiltinPlugin(this.name, raw);
 	}
-);
+}
 
-function getRawExternalItem(item: ExternalItem): RawExternalItem {
-	if (typeof item === "string") {
-		return { type: "string", stringPayload: item };
+type ArrayType<T> = T extends (infer R)[] ? R : never;
+type RecordValue<T> = T extends Record<any, infer R> ? R : never;
+type RawExternalItem = ArrayType<RawExternalsPluginOptions["externals"]>;
+type RawExternalItemValue = RecordValue<RawExternalItem>;
+
+function getRawExternalItem(
+	compiler: Compiler,
+	item: ExternalItem | undefined
+): RawExternalItem {
+	if (typeof item === "string" || item instanceof RegExp) {
+		return item;
 	}
-	if (item instanceof RegExp) {
-		return { type: "regexp", regexpPayload: item.source };
-	}
+
 	if (typeof item === "function") {
-		return {
-			type: "function",
-			fnPayload: async ctx => {
-				return await new Promise((resolve, reject) => {
-					const promise = item(ctx, (err, result, type) => {
+		return async (ctx: RawExternalItemFnCtx) => {
+			return await new Promise((resolve, reject) => {
+				const data = ctx.data();
+				const promise = item(
+					{
+						request: data.request,
+						dependencyType: data.dependencyType,
+						context: data.context,
+						contextInfo: {
+							issuer: data.contextInfo.issuer,
+							issuerLayer: data.contextInfo.issuerLayer ?? null
+						},
+						getResolve: function getResolve(options) {
+							const resolver = new Resolver(ctx.getResolver());
+							const getResolveContext = () => ({
+								fileDependencies: compiler._lastCompilation!.fileDependencies,
+								missingDependencies:
+									compiler._lastCompilation!.missingDependencies,
+								contextDependencies:
+									compiler._lastCompilation!.contextDependencies
+							});
+							const child = options ? resolver.withOptions(options) : resolver;
+							return (context, request, callback) => {
+								if (callback) {
+									child.resolve(
+										{},
+										context,
+										request,
+										getResolveContext(),
+										(err, result) => {
+											if (err) return callback(err);
+											// Sync with how webpack fixes the type:
+											// https://github.com/webpack/webpack/blob/a2ad76cd50ae780dead395c68ea67d46de9828f3/lib/ExternalModuleFactoryPlugin.js#L276
+											callback(
+												undefined,
+												typeof result === "string" ? result : undefined
+											);
+										}
+									);
+								} else {
+									return new Promise((resolve, reject) => {
+										child.resolve(
+											{},
+											context,
+											request,
+											getResolveContext(),
+											(err, result) => {
+												if (err) reject(err);
+												else resolve(result);
+											}
+										);
+									});
+								}
+							};
+						}
+					},
+					(err, result, type) => {
 						if (err) reject(err);
 						resolve({
 							result: getRawExternalItemValueFormFnResult(result),
-							external_type: type
+							externalType: type
 						});
-					}) as Promise<ExternalItemValue>;
-					if (promise && promise.then) {
-						promise.then(
-							result =>
-								resolve({
-									result: getRawExternalItemValueFormFnResult(result),
-									external_type: undefined
-								}),
-							e => reject(e)
-						);
 					}
-				});
-			}
+				) as Promise<ExternalItemValue> | ExternalItemValue | undefined;
+				if ((promise as Promise<ExternalItemValue>)?.then) {
+					(promise as Promise<ExternalItemValue>).then(
+						result =>
+							resolve({
+								result: getRawExternalItemValueFormFnResult(result),
+								externalType: undefined
+							}),
+						e => reject(e)
+					);
+				} else if (item.length === 1) {
+					// No callback and no promise returned, regarded as a synchronous function
+					resolve({
+						result: getRawExternalItemValueFormFnResult(
+							promise as ExternalItemValue | undefined
+						),
+						externalType: undefined
+					});
+				}
+			});
 		};
 	}
-	return {
-		type: "object",
-		objectPayload: Object.fromEntries(
+	if (typeof item === "object") {
+		return Object.fromEntries(
 			Object.entries(item).map(([k, v]) => [k, getRawExternalItemValue(v)])
-		)
-	};
+		);
+	}
+	throw new TypeError(`Unexpected type of external item: ${typeof item}`);
 }
 
 function getRawExternalItemValueFormFnResult(result?: ExternalItemValue) {
@@ -66,22 +145,10 @@ function getRawExternalItemValueFormFnResult(result?: ExternalItemValue) {
 function getRawExternalItemValue(
 	value: ExternalItemValue
 ): RawExternalItemValue {
-	if (typeof value === "string") {
-		return { type: "string", stringPayload: value };
-	} else if (typeof value === "boolean") {
-		return { type: "bool", boolPayload: value };
-	} else if (Array.isArray(value)) {
-		return {
-			type: "array",
-			arrayPayload: value
-		};
-	} else if (typeof value === "object" && value !== null) {
-		return {
-			type: "object",
-			objectPayload: Object.fromEntries(
-				Object.entries(value).map(([k, v]) => [k, Array.isArray(v) ? v : [v]])
-			)
-		};
+	if (value && typeof value === "object" && !Array.isArray(value)) {
+		return Object.fromEntries(
+			Object.entries(value).map(([k, v]) => [k, Array.isArray(v) ? v : [v]])
+		);
 	}
-	throw new Error("unreachable");
+	return value;
 }

@@ -4,7 +4,7 @@ use std::hash::Hash;
 use regex_syntax::hir::literal::ExtractKind;
 use regex_syntax::hir::{Hir, HirKind, Look};
 use regress::Match;
-use rspack_error::{internal_error, Error};
+use rspack_error::{error, Error};
 
 #[derive(Clone)]
 pub struct HashRegressRegex {
@@ -34,7 +34,7 @@ impl HashRegressRegex {
         expr: expr.to_string(),
         flags: flags.to_string(),
       }),
-      Err(err) => Err(internal_error!(
+      Err(err) => Err(error!(
         "Can't construct regex `/{expr}/{flags}`, original error message: {err}"
       )),
     }
@@ -60,7 +60,9 @@ pub enum Algo {
 impl Algo {
   pub(crate) fn new(expr: &str, flags: &str) -> Result<Algo, Error> {
     let ignore_case = flags.contains('i') || flags.contains('g') || flags.contains('y');
-    if let Some(algo) = Self::try_compile_to_end_with_fast_path(expr) && !ignore_case {
+    if let Some(algo) = Self::try_compile_to_end_with_fast_path(expr)
+      && !ignore_case
+    {
       Ok(algo)
     } else {
       match HashRegressRegex::new(expr, flags) {
@@ -98,33 +100,15 @@ impl Algo {
   pub(crate) fn global(&self) -> bool {
     match self {
       Algo::Regress(reg) => reg.flags.contains('g'),
-      Algo::EndWith { .. } => unreachable!(),
+      Algo::EndWith { .. } => false,
     }
   }
 
   pub(crate) fn sticky(&self) -> bool {
     match self {
       Algo::Regress(reg) => reg.flags.contains('y'),
-      Algo::EndWith { .. } => unreachable!(),
+      Algo::EndWith { .. } => false,
     }
-  }
-}
-
-#[cfg(test)]
-impl Algo {
-  fn end_with_pats(&self) -> std::collections::HashSet<&str> {
-    match self {
-      Algo::EndWith { pats } => pats.iter().map(|s| s.as_str()).collect(),
-      Algo::Regress(_) => panic!("expect EndWith"),
-    }
-  }
-
-  fn is_end_with(&self) -> bool {
-    matches!(self, Self::EndWith { .. })
-  }
-
-  fn is_regress(&self) -> bool {
-    matches!(self, Self::Regress(..))
   }
 }
 
@@ -140,6 +124,23 @@ fn is_ends_with_regex(hir: &Hir) -> bool {
 #[cfg(test)]
 mod test_algo {
   use super::*;
+
+  impl Algo {
+    fn end_with_pats(&self) -> std::collections::HashSet<&str> {
+      match self {
+        Algo::EndWith { pats } => pats.iter().map(|s| s.as_str()).collect(),
+        Algo::Regress(_) => panic!("expect EndWith"),
+      }
+    }
+
+    fn is_end_with(&self) -> bool {
+      matches!(self, Self::EndWith { .. })
+    }
+
+    fn is_regress(&self) -> bool {
+      matches!(self, Self::Regress(..))
+    }
+  }
 
   #[test]
   fn should_use_end_with_algo_with_i_flag() {

@@ -1,34 +1,41 @@
 [package]
-edition    = "2021"
-license    = "MIT"
-name       = "rspack_plugin_javascript"
-repository = "https://github.com/web-infra-dev/rspack"
-version    = "0.1.0"
-
-[dev-dependencies]
-rspack_testing = { path = "../rspack_testing" }
-
+description = "rspack javascript plugin"
+edition     = "2021"
+license     = "MIT"
+name        = "rspack_plugin_javascript"
+repository  = "https://github.com/web-infra-dev/rspack"
+version     = "0.2.0"
 [dependencies]
-anyhow = { workspace = true }
-async-recursion = { workspace = true }
+anymap = { workspace = true }
 async-trait = { workspace = true }
-either = "1"
+bitflags = { workspace = true }
+cow-utils = { workspace = true }
+dashmap = { workspace = true }
+either = { workspace = true }
+fast-glob = "0.4.4"
 indexmap = { workspace = true }
+indoc = { workspace = true }
+itertools = { workspace = true }
 linked_hash_set = { workspace = true }
+num-bigint = { version = "0.4.6" }
 once_cell = { workspace = true }
-preset_env_base = { workspace = true }
 rayon = { workspace = true }
 regex = { workspace = true }
-rspack_ast = { path = "../rspack_ast" }
-rspack_core = { path = "../rspack_core" }
-rspack_error = { path = "../rspack_error" }
-rspack_hash = { path = "../rspack_hash" }
-rspack_identifier = { path = "../rspack_identifier" }
-rspack_regex = { path = "../rspack_regex" }
-rspack_swc_visitors = { path = "../rspack_swc_visitors" }
+ropey = { workspace = true }
+rspack_ast = { workspace = true }
+rspack_cacheable = { workspace = true }
+rspack_collections = { workspace = true }
+rspack_core = { workspace = true }
+rspack_error = { workspace = true }
+rspack_hash = { workspace = true }
+rspack_hook = { workspace = true }
+rspack_ids = { workspace = true }
+rspack_paths = { workspace = true }
+rspack_regex = { workspace = true }
+rspack_util = { workspace = true }
 rustc-hash = { workspace = true }
 serde_json = { workspace = true }
-sourcemap = "6.2.3"
+stacker = { workspace = true }
 sugar_path = { workspace = true }
 swc_core = { workspace = true, features = [
   "__parser",
@@ -38,12 +45,13 @@ swc_core = { workspace = true, features = [
   "ecma_transforms_optimization",
   "ecma_transforms_module",
   "ecma_transforms_compat",
-  "ecma_transforms_proposal",
   "ecma_transforms_typescript",
+  "base",
   "ecma_quote",
 ] }
-swc_emotion = { workspace = true }
 swc_node_comments = { workspace = true }
-swc_plugin_import = { path = "../swc_plugin_import" }
-url = "2.4.0"
-xxhash-rust = { workspace = true, features = ["xxh32"] }
+tracing = { workspace = true }
+url = { workspace = true }
+
+[package.metadata.cargo-shear]
+ignored = ["tracing"]

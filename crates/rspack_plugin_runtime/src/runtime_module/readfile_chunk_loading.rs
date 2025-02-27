@@ -1,29 +1,36 @@
+use rspack_collections::{DatabaseItem, Identifier};
 use rspack_core::{
-  rspack_sources::{BoxSource, ConcatSource, RawSource, SourceExt},
-  Chunk, ChunkUkey, Compilation, RuntimeGlobals, RuntimeModule, RuntimeModuleStage,
+  compile_boolean_matcher, impl_runtime_module,
+  rspack_sources::{BoxSource, ConcatSource, RawStringSource, SourceExt},
+  BooleanMatcher, Chunk, ChunkUkey, Compilation, RuntimeGlobals, RuntimeModule, RuntimeModuleStage,
 };
-use rspack_identifier::Identifier;
 
-use super::utils::{chunk_has_js, get_output_dir};
-use crate::impl_runtime_module;
-use crate::runtime_module::utils::{get_initial_chunk_ids, render_condition_map, stringify_chunks};
+use super::{
+  generate_javascript_hmr_runtime,
+  utils::{chunk_has_js, get_output_dir},
+};
+use crate::{
+  get_chunk_runtime_requirements,
+  runtime_module::utils::{get_initial_chunk_ids, stringify_chunks},
+};
 
-#[derive(Debug, Default, Eq)]
+#[impl_runtime_module]
+#[derive(Debug)]
 pub struct ReadFileChunkLoadingRuntimeModule {
   id: Identifier,
   chunk: Option<ChunkUkey>,
-  runtime_requirements: RuntimeGlobals,
+}
+
+impl Default for ReadFileChunkLoadingRuntimeModule {
+  fn default() -> Self {
+    Self::with_default(
+      Identifier::from("webpack/runtime/readfile_chunk_loading"),
+      None,
+    )
+  }
 }
 
 impl ReadFileChunkLoadingRuntimeModule {
-  pub fn new(runtime_requirements: RuntimeGlobals) -> Self {
-    Self {
-      id: Identifier::from("webpack/runtime/readfile_chunk_loading"),
-      chunk: None,
-      runtime_requirements,
-    }
-  }
-
   fn generate_base_uri(
     &self,
     chunk: &Chunk,
@@ -48,109 +55,191 @@ impl ReadFileChunkLoadingRuntimeModule {
           }
         )
       });
-    RawSource::from(format!("{} = {};\n", RuntimeGlobals::BASE_URI, base_uri)).boxed()
+    RawStringSource::from(format!("{} = {};\n", RuntimeGlobals::BASE_URI, base_uri)).boxed()
   }
+
+  fn template_id(&self, id: TemplateId) -> String {
+    let base_id = self.id.to_string();
+
+    match id {
+      TemplateId::Raw => base_id,
+      TemplateId::WithOnChunkLoad => format!("{}_with_on_chunk_load", base_id),
+      TemplateId::WithLoading => format!("{}_with_loading", base_id),
+      TemplateId::WithExternalInstallChunk => format!("{}_with_external_install_chunk", base_id),
+      TemplateId::WithHmr => format!("{}_with_hmr", base_id),
+      TemplateId::WithHmrManifest => format!("{}_with_hmr_manifest", base_id),
+    }
+  }
+}
+
+#[allow(clippy::enum_variant_names)]
+enum TemplateId {
+  Raw,
+  WithOnChunkLoad,
+  WithLoading,
+  WithExternalInstallChunk,
+  WithHmr,
+  WithHmrManifest,
 }
 
 impl RuntimeModule for ReadFileChunkLoadingRuntimeModule {
   fn name(&self) -> Identifier {
     self.id
   }
-  fn generate(&self, compilation: &Compilation) -> BoxSource {
+
+  fn template(&self) -> Vec<(String, String)> {
+    vec![
+      (
+        self.template_id(TemplateId::WithOnChunkLoad),
+        include_str!("runtime/readfile_chunk_loading_with_on_chunk_load.ejs").to_string(),
+      ),
+      (
+        self.template_id(TemplateId::Raw),
+        include_str!("runtime/readfile_chunk_loading.ejs").to_string(),
+      ),
+      (
+        self.template_id(TemplateId::WithLoading),
+        include_str!("runtime/readfile_chunk_loading_with_loading.ejs").to_string(),
+      ),
+      (
+        self.template_id(TemplateId::WithExternalInstallChunk),
+        include_str!("runtime/readfile_chunk_loading_with_external_install_chunk.ejs").to_string(),
+      ),
+      (
+        self.template_id(TemplateId::WithHmr),
+        include_str!("runtime/readfile_chunk_loading_with_hmr.ejs").to_string(),
+      ),
+      (
+        self.template_id(TemplateId::WithHmrManifest),
+        include_str!("runtime/readfile_chunk_loading_with_hmr_manifest.ejs").to_string(),
+      ),
+    ]
+  }
+
+  fn generate(&self, compilation: &Compilation) -> rspack_error::Result<BoxSource> {
     let chunk = compilation
       .chunk_by_ukey
-      .get(&self.chunk.expect("The chunk should be attached."))
-      .expect("Chunk is not found, make sure you had attach chunkUkey successfully.");
-    let with_hmr = self
-      .runtime_requirements
-      .contains(RuntimeGlobals::HMR_DOWNLOAD_UPDATE_HANDLERS);
-    let with_external_install_chunk = self
-      .runtime_requirements
-      .contains(RuntimeGlobals::EXTERNAL_INSTALL_CHUNK);
+      .expect_get(&self.chunk.expect("The chunk should be attached."));
+    let runtime_requirements = get_chunk_runtime_requirements(compilation, &chunk.ukey());
+
+    let with_base_uri = runtime_requirements.contains(RuntimeGlobals::BASE_URI);
+    let with_hmr = runtime_requirements.contains(RuntimeGlobals::HMR_DOWNLOAD_UPDATE_HANDLERS);
+    let with_hmr_manifest = runtime_requirements.contains(RuntimeGlobals::HMR_DOWNLOAD_MANIFEST);
+    let with_external_install_chunk =
+      runtime_requirements.contains(RuntimeGlobals::EXTERNAL_INSTALL_CHUNK);
+    let with_loading = runtime_requirements.contains(RuntimeGlobals::ENSURE_CHUNK_HANDLERS);
+    let with_on_chunk_load = runtime_requirements.contains(RuntimeGlobals::ON_CHUNKS_LOADED);
+
+    let condition_map =
+      compilation
+        .chunk_graph
+        .get_chunk_condition_map(&chunk.ukey(), compilation, chunk_has_js);
+    let has_js_matcher = compile_boolean_matcher(&condition_map);
+
     let initial_chunks = get_initial_chunk_ids(self.chunk, compilation, chunk_has_js);
-    let root_output_dir = get_output_dir(chunk, compilation, true);
+    let root_output_dir = get_output_dir(chunk, compilation, false)?;
     let mut source = ConcatSource::default();
 
-    if self.runtime_requirements.contains(RuntimeGlobals::BASE_URI) {
+    if with_base_uri {
       source.add(self.generate_base_uri(chunk, compilation, &root_output_dir));
     }
 
     if with_hmr {
       let state_expression = format!("{}_readFileVm", RuntimeGlobals::HMR_RUNTIME_STATE_PREFIX);
-      source.add(RawSource::from(format!(
+      source.add(RawStringSource::from(format!(
         "var installedChunks = {} = {} || {};\n",
         state_expression,
         state_expression,
-        &stringify_chunks(&initial_chunks, 1)
+        &stringify_chunks(&initial_chunks, 0)
       )));
     } else {
-      source.add(RawSource::from(format!(
+      source.add(RawStringSource::from(format!(
         "var installedChunks = {};\n",
         &stringify_chunks(&initial_chunks, 0)
       )));
     }
 
-    let with_loading = self
-      .runtime_requirements
-      .contains(RuntimeGlobals::ENSURE_CHUNK_HANDLERS);
-    let with_on_chunk_load = self
-      .runtime_requirements
-      .contains(RuntimeGlobals::ON_CHUNKS_LOADED);
-
-    if with_loading {
-      source.add(RawSource::from(
-        include_str!("runtime/readfile_chunk_loading.js").replace(
-          "$withOnChunkLoad$",
-          match with_on_chunk_load {
-            true => "__webpack_require__.O();",
-            false => "",
-          },
-        ),
-      ));
-    }
-
-    if with_loading {
-      let condition_map =
-        compilation
-          .chunk_graph
-          .get_chunk_condition_map(&chunk.ukey, compilation, chunk_has_js);
-      source.add(RawSource::from(
-        include_str!("runtime/readfile_chunk_loading_with_loading.js")
-          .replace("JS_MATCHER", &render_condition_map(&condition_map))
-          .replace("$OUTPUT_DIR$", &root_output_dir),
-      ));
-    }
-    if with_hmr {
-      source.add(RawSource::from(include_str!(
-        "runtime/readfile_chunk_loading_with_hmr.js"
-      )));
-      source.add(RawSource::from(
-        include_str!("runtime/javascript_hot_module_replacement.js").replace("$key$", "readFileVm"),
-      ));
-    }
-
-    if self
-      .runtime_requirements
-      .contains(RuntimeGlobals::HMR_DOWNLOAD_MANIFEST)
-    {
-      source.add(RawSource::from(include_str!(
-        "runtime/readfile_chunk_loading_with_hmr_manifest.js"
-      )));
-    }
-
     if with_on_chunk_load {
-      source.add(RawSource::from(include_str!(
-        "runtime/readfile_chunk_loading_with_on_chunk_load.js"
+      let source_with_on_chunk_load = compilation
+        .runtime_template
+        .render(&self.template_id(TemplateId::WithOnChunkLoad), None)?;
+
+      source.add(RawStringSource::from(source_with_on_chunk_load));
+    }
+
+    if with_loading || with_external_install_chunk {
+      let raw_source = compilation.runtime_template.render(
+        &self.template_id(TemplateId::Raw),
+        Some(serde_json::json!({
+          "_with_on_chunk_loaded": match with_on_chunk_load {
+            true => format!("{}();", RuntimeGlobals::ON_CHUNKS_LOADED.name()),
+            false => "".to_string(),
+          }
+        })),
+      )?;
+
+      source.add(RawStringSource::from(raw_source));
+    }
+
+    if with_loading {
+      let body = if matches!(has_js_matcher, BooleanMatcher::Condition(false)) {
+        "installedChunks[chunkId] = 0;".to_string()
+      } else {
+        compilation.runtime_template.render(
+          &self.template_id(TemplateId::WithLoading),
+          Some(serde_json::json!({
+            "_js_matcher": &has_js_matcher.render("chunkId"),
+            "_output_dir": &root_output_dir,
+            "_match_fallback": if matches!(has_js_matcher, BooleanMatcher::Condition(true)) {
+              ""
+            } else {
+              "else installedChunks[chunkId] = 0;\n"
+            },
+          })),
+        )?
+      };
+
+      source.add(RawStringSource::from(format!(
+        r#"
+        // ReadFile + VM.run chunk loading for javascript"
+        __webpack_require__.f.readFileVm = function (chunkId, promises) {{
+          {body}
+        }};
+        "#
       )));
     }
 
     if with_external_install_chunk {
-      source.add(RawSource::from(include_str!(
-        "runtime/readfile_chunk_loading_with_external_install_chunk.js"
+      let source_with_external_install_chunk = compilation.runtime_template.render(
+        &self.template_id(TemplateId::WithExternalInstallChunk),
+        None,
+      )?;
+
+      source.add(RawStringSource::from(source_with_external_install_chunk));
+    }
+
+    if with_hmr {
+      let source_with_hmr = compilation
+        .runtime_template
+        .render(&self.template_id(TemplateId::WithHmr), None)?;
+      source.add(RawStringSource::from(source_with_hmr));
+      source.add(RawStringSource::from(generate_javascript_hmr_runtime(
+        "readFileVm",
       )));
     }
 
-    source.boxed()
+    if with_hmr_manifest {
+      let source_with_hmr_manifest = compilation.runtime_template.render(
+        &self.template_id(TemplateId::WithHmrManifest),
+        Some(serde_json::json!({
+          "_output_dir":  &root_output_dir
+        })),
+      )?;
+
+      source.add(RawStringSource::from(source_with_hmr_manifest));
+    }
+
+    Ok(source.boxed())
   }
 
   fn attach(&mut self, chunk: ChunkUkey) {
@@ -160,4 +249,3 @@ impl RuntimeModule for ReadFileChunkLoadingRuntimeModule {
     RuntimeModuleStage::Attach
   }
 }
-impl_runtime_module!(ReadFileChunkLoadingRuntimeModule);

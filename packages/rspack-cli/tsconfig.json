@@ -2,17 +2,15 @@
   "extends": "../../tsconfig.base.json",
   "include": ["src"],
   "compilerOptions": {
-    "strictNullChecks": true,
     "outDir": "dist",
-    "rootDir": "src",
-    "moduleResolution": "nodenext"
+    "rootDir": "src"
   },
   "references": [
     {
       "path": "../rspack"
-    },
-    {
-      "path": "../rspack-dev-server"
     }
-  ]
+  ],
+  "ts-node": {
+    "transpileOnly": true
+  }
 }

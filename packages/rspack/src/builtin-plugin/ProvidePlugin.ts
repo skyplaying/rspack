@@ -1,4 +1,6 @@
-import { BuiltinPluginName, create } from "./base";
+import { BuiltinPluginName } from "@rspack/binding";
+
+import { create } from "./base";
 
 export type ProvidePluginOptions = Record<string, string | string[]>;
 export const ProvidePlugin = create(
@@ -11,5 +13,6 @@ export const ProvidePlugin = create(
 			return [key, value];
 		});
 		return Object.fromEntries(entries);
-	}
+	},
+	"compilation"
 );
